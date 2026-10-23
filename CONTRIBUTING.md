@@ -5,7 +5,7 @@ Thanks for your interest in improving Claude Shepherd! Issues and pull requests 
 ## Ways to contribute
 
 - **Report a bug** or **request a feature** via [GitHub Issues](https://github.com/trantholock/claude-shepherd/issues/new/choose).
-- **Translate** the UI/CLI labels (currently Vietnamese) — English is the most wanted.
+- **Translate** the UI into more languages (strings are paired with `T("en", "vi")` in `ccmon/ccmon` and `t("en", "vi")` in the app).
 - **Add support** for more terminals/editors in `ccmon focus` (Terminal.app, Ghostty, WezTerm, Cursor, …).
 - **Improve docs** — screenshots and GIFs are especially helpful.
 

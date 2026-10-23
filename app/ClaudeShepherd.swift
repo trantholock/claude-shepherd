@@ -28,19 +28,32 @@ struct Limit: Codable { let used_percentage: Double?; let resets_at: Double? }
 struct Usage: Codable { let updated: Double?; let five_hour: Limit?; let seven_day: Limit? }
 struct Snap: Codable { let now: Double; let rows: [Row]; let usage: Usage? }
 
+// ngôn ngữ: CCMON_LANG > ~/.claude/ccmon/config.json > ngôn ngữ chính của macOS (giống ccmon)
+let VI: Bool = {
+    if let l = ProcessInfo.processInfo.environment["CCMON_LANG"], !l.isEmpty { return l.hasPrefix("vi") }
+    if let d = FileManager.default.contents(atPath: NSHomeDirectory() + "/.claude/ccmon/config.json"),
+       let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let l = j["lang"] as? String {
+        return l.hasPrefix("vi")
+    }
+    return Locale.preferredLanguages.first?.hasPrefix("vi") ?? false
+}()
+
+func t(_ en: String, _ vi: String) -> String { VI ? vi : en }
+
 func quotaColor(_ p: Double) -> Color { p >= 90 ? .red : p >= 70 ? .orange : .green }
 
 func resetText(_ t: Double?, _ now: Double) -> String {
     guard let t = t else { return "" }
-    if t <= now { return "đã reset" }
+    if t <= now { return VI ? "đã reset" : "reset" }
     let f = DateFormatter()
-    f.locale = Locale(identifier: "vi_VN")
+    f.locale = VI ? Locale(identifier: "vi_VN") : Locale.current
     f.dateFormat = t - now < 86400 ? "HH:mm" : "EEE HH:mm"
     return "reset " + f.string(from: Date(timeIntervalSince1970: t))
 }
 
-let LABEL = ["waiting": "CHỜ BẠN", "done": "XONG", "running": "ĐANG CHẠY",
-             "interrupted": "BỊ NGẮT", "idle": "MỞ, CHƯA LÀM", "closed": "ĐÃ ĐÓNG"]
+let LABEL = ["waiting": t("WAITING", "CHỜ BẠN"), "done": t("DONE", "XONG"), "running": t("RUNNING", "ĐANG CHẠY"),
+             "interrupted": t("INTERRUPTED", "BỊ NGẮT"), "idle": t("OPEN, IDLE", "MỞ, CHƯA LÀM"),
+             "closed": t("CLOSED", "ĐÃ ĐÓNG")]
 let COLOR: [String: Color] = ["waiting": .orange, "done": .green, "running": .blue,
                               "interrupted": .pink, "idle": .gray, "closed": .gray]
 
@@ -112,15 +125,15 @@ final class Store: ObservableObject {
 
     func rename(_ r: Row) {
         let alert = NSAlert()
-        alert.messageText = "Đổi tên phiên"
-        alert.informativeText = "\(r.project ?? "") · \(r.session_id.prefix(8))\nĐể trống = dùng tên tự động" +
+        alert.messageText = t("Rename session", "Đổi tên phiên")
+        alert.informativeText = "\(r.project ?? "") · \(r.session_id.prefix(8))\n" + t("Leave empty to use the automatic name", "Để trống = dùng tên tự động") +
             ((r.auto_name ?? "").isEmpty ? "." : " (\(r.auto_name!)).")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
         field.stringValue = r.name ?? ""
         field.placeholderString = r.auto_name ?? r.project ?? ""
         alert.accessoryView = field
-        alert.addButton(withTitle: "Lưu")
-        alert.addButton(withTitle: "Hủy")
+        alert.addButton(withTitle: t("Save", "Lưu"))
+        alert.addButton(withTitle: t("Cancel", "Hủy"))
         NSApp.activate(ignoringOtherApps: true)
         alert.window.initialFirstResponder = field
         if alert.runModal() == .alertFirstButtonReturn {
@@ -165,13 +178,13 @@ struct RowView: View {
                         .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     if hover {
                         Button { store.rename(r) } label: { Image(systemName: "pencil") }
-                            .buttonStyle(.borderless).help("Đổi tên phiên")
+                            .buttonStyle(.borderless).help(t("Rename session", "Đổi tên phiên"))
                     }
                     Text((r.displayTitle != r.project ? (r.project ?? "") + " · " : "") + (r.app ?? ""))
                         .font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
                     Spacer()
                     if r.state == "running", r.turn_started != nil {
-                        Text("chạy " + ago(r.turn_started, now)).font(.system(size: 11)).foregroundColor(.secondary)
+                        Text(t("running ", "chạy ") + ago(r.turn_started, now)).font(.system(size: 11)).foregroundColor(.secondary)
                     } else {
                         Text(ago(r.updated, now)).font(.system(size: 11)).foregroundColor(.secondary)
                     }
@@ -190,16 +203,16 @@ struct RowView: View {
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .onTapGesture { store.focus(r.session_id) }
-        .help("Bấm để mở tab/cửa sổ của phiên này")
+        .help(t("Click to open this session's tab/window", "Bấm để mở tab/cửa sổ của phiên này"))
         .contextMenu {
-            Button("Mở phiên") { store.focus(r.session_id) }
-            Button("Đổi tên…") { store.rename(r) }
-            if r.isNew { Button("Đánh dấu đã xem") { store.act("ack", r.session_id) } }
+            Button(t("Open session", "Mở phiên")) { store.focus(r.session_id) }
+            Button(t("Rename…", "Đổi tên…")) { store.rename(r) }
+            if r.isNew { Button(t("Mark as seen", "Đánh dấu đã xem")) { store.act("ack", r.session_id) } }
             Button("Copy session ID") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(r.session_id, forType: .string)
             }
-            if r.state == "closed" { Button("Xóa khỏi danh sách") { store.act("forget", r.session_id) } }
+            if r.state == "closed" { Button(t("Remove from list", "Xóa khỏi danh sách")) { store.act("forget", r.session_id) } }
         }
     }
 }
@@ -234,13 +247,14 @@ struct QuotaView: View {
         if let u = store.usage, u.updated != nil {
             HStack(spacing: 14) {
                 if let p = store.pct(u.five_hour) {
-                    QuotaBar(label: "Quota 5 giờ", pct: p, reset: resetText(u.five_hour?.resets_at, store.now))
+                    QuotaBar(label: t("5-hour quota", "Quota 5 giờ"), pct: p, reset: resetText(u.five_hour?.resets_at, store.now))
                 }
                 if let p = store.pct(u.seven_day) {
-                    QuotaBar(label: "Quota 7 ngày", pct: p, reset: resetText(u.seven_day?.resets_at, store.now))
+                    QuotaBar(label: t("7-day quota", "Quota 7 ngày"), pct: p, reset: resetText(u.seven_day?.resets_at, store.now))
                 }
             }
-            .help("Cập nhật \(ago(u.updated, store.now)) trước, từ statusLine của phiên Claude gần nhất")
+            .help(t("Updated \(ago(u.updated, store.now)) ago, from the latest Claude session's statusLine",
+                     "Cập nhật \(ago(u.updated, store.now)) trước, từ statusLine của phiên Claude gần nhất"))
             .padding(.horizontal, 12).padding(.bottom, 10)
         }
     }
@@ -254,12 +268,12 @@ struct Panel: View {
     var groups: [(String, [Row])] {
         var used = Set<String>()
         let defs: [(String, (Row) -> Bool)] = [
-            ("Cần bạn xử lý", { $0.isNew }),
-            ("Đang chạy", { $0.state == "running" }),
-            ("Chờ bạn", { $0.state == "waiting" }),
-            ("Xong / đã xem", { $0.state == "done" || $0.state == "interrupted" }),
-            ("Mở, chưa làm gì", { $0.state == "idle" }),
-            ("Đã đóng", { $0.state == "closed" }),
+            (t("Needs you", "Cần bạn xử lý"), { $0.isNew }),
+            (t("Running", "Đang chạy"), { $0.state == "running" }),
+            (t("Waiting for you", "Chờ bạn"), { $0.state == "waiting" }),
+            (t("Done / seen", "Xong / đã xem"), { $0.state == "done" || $0.state == "interrupted" }),
+            (t("Open, idle", "Mở, chưa làm gì"), { $0.state == "idle" }),
+            (t("Closed", "Đã đóng"), { $0.state == "closed" }),
         ]
         var out: [(String, [Row])] = []
         for (title, f) in defs {
@@ -275,10 +289,10 @@ struct Panel: View {
             HStack {
                 Text("Claude Shepherd").font(.headline)
                 Spacer()
-                Text("\(store.need) cần bạn").font(.system(size: 11, weight: .semibold)).foregroundColor(.orange)
-                Text("· \(store.running) đang chạy").font(.system(size: 11)).foregroundColor(.blue)
+                Text("\(store.need) " + t("need you", "cần bạn")).font(.system(size: 11, weight: .semibold)).foregroundColor(.orange)
+                Text("· \(store.running) " + t("running", "đang chạy")).font(.system(size: 11)).foregroundColor(.blue)
                 if store.need > 0 {
-                    Button("Đã xem hết") { store.act("ack", "all") }.controlSize(.small)
+                    Button(t("Mark all seen", "Đã xem hết")) { store.act("ack", "all") }.controlSize(.small)
                 }
             }
             .padding(12)
@@ -286,11 +300,12 @@ struct Panel: View {
             Divider()
             if !store.online {
                 VStack(spacing: 8) {
-                    Text("Không kết nối được ccmon (127.0.0.1:7788)").foregroundColor(.secondary)
-                    Button("Khởi động lại ccmon serve") { store.startServer() }
+                    Text(t("Can't reach ccmon (127.0.0.1:7788)", "Không kết nối được ccmon (127.0.0.1:7788)")).foregroundColor(.secondary)
+                    Button(t("Restart ccmon serve", "Khởi động lại ccmon serve")) { store.startServer() }
                 }.frame(maxWidth: .infinity, minHeight: 120)
             } else if store.rows.isEmpty {
-                Text("Không có phiên nào.\nMở một phiên Claude Code để bắt đầu theo dõi.")
+                Text(t("No sessions.\nOpen a Claude Code session to start tracking.",
+                       "Không có phiên nào.\nMở một phiên Claude Code để bắt đầu theo dõi."))
                     .multilineTextAlignment(.center).foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 120)
             } else {
@@ -307,13 +322,13 @@ struct Panel: View {
             }
             Divider()
             HStack {
-                Toggle("Hiện phiên đã đóng", isOn: $store.showClosed).toggleStyle(.checkbox).font(.system(size: 11))
+                Toggle(t("Show closed sessions", "Hiện phiên đã đóng"), isOn: $store.showClosed).toggleStyle(.checkbox).font(.system(size: 11))
                 Spacer()
                 if !inWindow {
-                    Button("Mở cửa sổ") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+                    Button(t("Open window", "Mở cửa sổ")) { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
                 }
-                Button("Dashboard web") { NSWorkspace.shared.open(URL(string: "http://127.0.0.1:7788")!) }
-                Button("Thoát") { NSApp.terminate(nil) }
+                Button(t("Web dashboard", "Dashboard web")) { NSWorkspace.shared.open(URL(string: "http://127.0.0.1:7788")!) }
+                Button(t("Quit", "Thoát")) { NSApp.terminate(nil) }
             }
             .controlSize(.small)
             .padding(10)

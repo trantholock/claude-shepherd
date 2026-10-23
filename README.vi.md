@@ -7,6 +7,8 @@
 [![CI](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+![Dashboard Claude Shepherd](docs/demo.gif)
+
 Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTerm, VSCode extension, terminal trong VSCode) để không bỏ sót agent nào đã xong hoặc đang chờ bạn.
 
 - **Hook** của Claude Code ghi trạng thái từng phiên vào `~/.claude/ccmon/sessions/<session_id>.json`
@@ -59,6 +61,7 @@ ccmon ack [id|all]    đánh dấu đã xem
 ccmon clean           xóa phiên đã đóng
 ccmon name <id> [tên] đặt tên phiên (bỏ trống = xóa tên tự đặt)
 ccmon usage           quota 5h / 7 ngày
+ccmon lang [en|vi|auto] ngôn ngữ giao diện
 ccmon statusline      (dùng cho statusLine của Claude Code)
 ```
 
@@ -71,6 +74,16 @@ Claude Code gửi JSON cho lệnh `statusLine` sau mỗi lượt, có `rate_limi
 - Tên hiển thị: tên tự đặt (`~/.claude/ccmon/names.json`) > `session_name` Claude tự đặt > tên thư mục.
 
 Tắt thông báo macOS: đặt `CCMON_NOTIFY=0` trong môi trường của Claude Code.
+
+## Ngôn ngữ
+
+CLI, thông báo, dashboard và app theo ngôn ngữ chính của macOS (mặc định tiếng Anh, tiếng Việt nếu macOS đặt tiếng Việt). Để chọn cố định:
+
+```bash
+ccmon lang vi     # hoặc: en, auto
+```
+
+Lưu ở `~/.claude/ccmon/config.json`; khởi động lại app và `ccmon serve` để áp dụng. Biến môi trường `CCMON_LANG=en|vi` được ưu tiên hơn.
 
 ## Cấu trúc
 

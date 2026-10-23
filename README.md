@@ -8,6 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
 
+![Claude Shepherd dashboard: sessions move from running to done or waiting for permission](docs/demo.gif)
+
 Keep track of every **Claude Code** session you run in parallel (iTerm, the VS Code extension, the VS Code terminal) so you never miss an agent that has finished or is waiting on you.
 
 - **Claude Code hooks** write each session's state to `~/.claude/ccmon/sessions/<session_id>.json`
@@ -18,8 +20,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **`ccmon` CLI**
 
-> [!NOTE]
-> The UI labels and CLI output are currently in Vietnamese. Translations are a great first contribution — see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **English and Vietnamese** UI — more translations welcome
 
 ## Requirements
 
@@ -76,6 +77,7 @@ ccmon ack [id|all]     mark as seen
 ccmon clean            delete closed sessions
 ccmon name <id> [name] set a session name (empty name = clear it)
 ccmon usage            5h / 7d quota
+ccmon lang [en|vi|auto] UI language
 ccmon statusline       (used as Claude Code's statusLine command)
 ```
 
@@ -88,6 +90,16 @@ After each turn Claude Code sends JSON to the `statusLine` command, including `r
 - Display name priority: your custom name (`~/.claude/ccmon/names.json`) > Claude's `session_name` > folder name.
 
 To disable macOS notifications, set `CCMON_NOTIFY=0` in Claude Code's environment.
+
+## Language
+
+The CLI, notifications, web dashboard and app follow your macOS language (English by default, Vietnamese if macOS is set to Vietnamese). To override it:
+
+```bash
+ccmon lang vi     # or: en, auto
+```
+
+This is saved in `~/.claude/ccmon/config.json`; restart the app and `ccmon serve` to apply. `CCMON_LANG=en|vi` in the environment takes precedence.
 
 ## Project layout
 

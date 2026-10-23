@@ -1,16 +1,17 @@
 #!/usr/bin/python3
-"""ccmon — theo dõi trạng thái mọi phiên Claude Code (terminal + VSCode).
+"""ccmon — track every Claude Code session (terminal + VS Code).
 
-  ccmon hook            # gọi từ hook của Claude Code (đọc JSON từ stdin)
-  ccmon [ls] [-a]       # bảng trạng thái (-a: gồm cả phiên đã đóng)
-  ccmon watch           # bảng tự làm mới mỗi 2s
-  ccmon serve [port]    # dashboard web http://127.0.0.1:7788
-  ccmon focus <id>      # nhảy tới tab iTerm / cửa sổ VSCode của phiên
-  ccmon ack <id|all>    # đánh dấu đã xem
-  ccmon clean           # xóa phiên đã đóng
-  ccmon name <id> [tên] # đặt tên dễ nhớ cho phiên (bỏ trống tên = xóa)
-  ccmon usage           # quota 5h / 7 ngày của gói Claude
-  ccmon statusline      # gọi từ statusLine của Claude Code: ghi quota + tên phiên
+  ccmon hook            # called by Claude Code hooks (reads JSON from stdin)
+  ccmon [ls] [-a]       # status table (-a: include closed sessions)
+  ccmon watch           # table that refreshes every 2s
+  ccmon serve [port]    # web dashboard http://127.0.0.1:7788
+  ccmon focus <id>      # jump to the session's iTerm tab / VS Code window
+  ccmon ack <id|all>    # mark as seen
+  ccmon clean           # delete closed sessions
+  ccmon name <id> [name] # give a session a memorable name (empty = clear)
+  ccmon usage           # Claude plan quota, 5h / 7d
+  ccmon lang [en|vi|auto]  # UI language (default: follows macOS)
+  ccmon statusline      # called by Claude Code statusLine: stores quota + session name
 """
 import json
 import os
@@ -27,14 +28,6 @@ USAGE = os.path.join(BASE, "usage.json")    # quota gần nhất
 KEEP_CLOSED_SEC = 24 * 3600
 NOTIFY = os.environ.get("CCMON_NOTIFY", "1") != "0"
 
-LABEL = {
-    "waiting": "CHỜ BẠN",
-    "done": "XONG",
-    "running": "ĐANG CHẠY",
-    "interrupted": "BỊ NGẮT",
-    "idle": "MỞ, CHƯA LÀM",
-    "closed": "ĐÃ ĐÓNG",
-}
 ORDER = ["waiting", "done", "interrupted", "running", "idle", "closed"]
 
 
@@ -74,6 +67,43 @@ def write_json(path, data):
     with open(tmp, "w") as f:
         json.dump(data, f, ensure_ascii=False)
     os.replace(tmp, path)
+
+
+# ---------- ngôn ngữ ----------
+
+CONFIG = os.path.join(BASE, "config.json")  # {"lang": "en" | "vi"}
+_VI = None
+
+
+def is_vi():
+    """CCMON_LANG > config.json > ngôn ngữ chính của macOS; mặc định tiếng Anh."""
+    global _VI
+    if _VI is None:
+        lang = os.environ.get("CCMON_LANG") or read_json(CONFIG, {}).get("lang") or ""
+        if not lang:
+            try:
+                out = subprocess.check_output(["defaults", "read", "-g", "AppleLanguages"],
+                                              text=True, stderr=subprocess.DEVNULL)
+                lang = out.strip("()\n ").split(",")[0].strip().strip('"')
+            except Exception:
+                pass
+        _VI = lang.lower().startswith("vi")
+    return _VI
+
+
+def T(en, vi):
+    return vi if is_vi() else en
+
+
+def label(st):
+    return {
+        "waiting": T("WAITING", "CHỜ BẠN"),
+        "done": T("DONE", "XONG"),
+        "running": T("RUNNING", "ĐANG CHẠY"),
+        "interrupted": T("INTERRUPTED", "BỊ NGẮT"),
+        "idle": T("OPEN, IDLE", "MỞ, CHƯA LÀM"),
+        "closed": T("CLOSED", "ĐÃ ĐÓNG"),
+    }[st]
 
 
 def set_name(sid, name):
@@ -234,12 +264,12 @@ def hook():
             pass  # nhắc nhở sau khi đã Stop, giữ nguyên trạng thái "done"
         else:
             s.update(status="waiting", message=msg, seen=False)
-            notify("⏸ Claude chờ bạn — " + proj, msg)
+            notify(T("⏸ Claude is waiting — ", "⏸ Claude chờ bạn — ") + proj, msg)
     elif ev == "Stop":
         s.update(status="done", seen=False, message="", activity="",
                  reply=last_reply(s["transcript"])[:1500], finished=now)
         dur = now - s.get("turn_started", now)
-        notify("✅ Claude xong — " + proj, "(%s) %s" % (fmt_dur(dur), (s.get("reply") or s.get("last_prompt", ""))[:180]))
+        notify(T("✅ Claude is done — ", "✅ Claude xong — ") + proj, "(%s) %s" % (fmt_dur(dur), (s.get("reply") or s.get("last_prompt", ""))[:180]))
     elif ev == "SessionEnd":
         s.update(status="closed", reason=data.get("reason", ""))
     save(s)
@@ -252,7 +282,7 @@ def fmt_reset(ts):
         return ""
     d = ts - time.time()
     if d <= 0:
-        return "đã reset"
+        return T("reset", "đã reset")
     if d < 86400:
         return "reset " + time.strftime("%H:%M", time.localtime(ts))
     return "reset " + time.strftime("%d/%m %H:%M", time.localtime(ts))
@@ -310,15 +340,16 @@ def statusline():
 def render_usage():
     u = usage()
     if not u.get("updated"):
-        return "Chưa có dữ liệu quota (cần ít nhất 1 phiên Claude Code hiển thị statusLine)."
+        return T("No quota data yet (needs at least one Claude Code session showing the statusLine).",
+                 "Chưa có dữ liệu quota (cần ít nhất 1 phiên Claude Code hiển thị statusLine).")
     out = []
-    for k, lbl in (("five_hour", "Phiên 5 giờ"), ("seven_day", "Tuần (7 ngày)")):
+    for k, lbl in (("five_hour", T("5-hour", "Phiên 5 giờ")), ("seven_day", T("Week (7d)", "Tuần (7 ngày)"))):
         v = u.get(k)
         if v:
             pct = v.get("used_percentage") or 0
             bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
             out.append("%-14s %s %3d%%  %s" % (lbl, bar, pct, fmt_reset(v.get("resets_at"))))
-    out.append("(cập nhật %s trước)" % fmt_dur(time.time() - u["updated"]))
+    out.append(T("(updated %s ago)", "(cập nhật %s trước)") % fmt_dur(time.time() - u["updated"]))
     return "\n".join(out)
 
 
@@ -398,13 +429,14 @@ def render(include_closed=False):
     rows = snapshot(include_closed)
     now = time.time()
     if not rows:
-        return "Không có phiên Claude nào đang mở (hook chỉ ghi nhận phiên khởi động sau khi cài).\n"
+        return T("No open Claude sessions (the hook only sees sessions started after install).\n",
+                 "Không có phiên Claude nào đang mở (hook chỉ ghi nhận phiên khởi động sau khi cài).\n")
     width = os.get_terminal_size().columns if sys.stdout.isatty() else 140
-    out = ["%-8s  %-12s %-11s %-24s %6s  %s" % ("ID", "TRẠNG THÁI", "Ở ĐÂU", "PHIÊN", "LÂU", "NỘI DUNG")]
+    out = ["%-8s  %-12s %-11s %-24s %6s  %s" % ("ID", T("STATE", "TRẠNG THÁI"), T("WHERE", "Ở ĐÂU"), T("SESSION", "PHIÊN"), T("AGE", "LÂU"), T("DETAIL", "NỘI DUNG"))]
     for r in rows:
         st = r["state"]
         new = st in ("done", "waiting") and not r.get("seen", True)
-        label = ("● " if new else "  ") + LABEL[st]
+        lbl = ("● " if new else "  ") + label(st)
         if st == "running":
             detail = r.get("activity") or r.get("last_prompt", "")
         elif st == "waiting":
@@ -415,13 +447,13 @@ def render(include_closed=False):
             detail = r.get("last_prompt") or ""
         detail = "%s  « %s" % (detail, (r.get("last_prompt") or "")[:60]) if st in ("done", "waiting") else detail
         line = "%-8s  %-12s %-11s %-24s %6s  %s" % (
-            r["session_id"][:8], label, r.get("app", "?")[:11], r["title"][:24],
+            r["session_id"][:8], lbl, r.get("app", "?")[:11], r["title"][:24],
             fmt_dur(now - r.get("updated", now)), detail.replace("\n", " "))
         out.append(COLOR.get(st, "") + line[:width] + "\033[0m")
     counts = {}
     for r in rows:
         counts[r["state"]] = counts.get(r["state"], 0) + 1
-    out.append("\n" + "  ".join("%s: %d" % (LABEL[k], counts[k]) for k in ORDER if k in counts))
+    out.append("\n" + "  ".join("%s: %d" % (label(k), counts[k]) for k in ORDER if k in counts))
     out.append(render_usage())
     return "\n".join(out) + "\n"
 
@@ -486,7 +518,7 @@ end tell
 return "notfound"''' % s["iterm"]
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
         return r.stdout.strip() or r.stderr.strip()
-    return "không biết cách focus app %s" % s.get("app")
+    return T("don't know how to focus app %s", "không biết cách focus app %s") % s.get("app")
 
 
 # ---------- web ----------
@@ -514,7 +546,7 @@ def serve(port):
                 self._send(200, json.dumps({"now": time.time(), "rows": snapshot(all_), "usage": usage()},
                                            ensure_ascii=False))
             elif u.path == "/":
-                self._send(200, PAGE, "text/html")
+                self._send(200, PAGE.replace("__LANG__", "vi" if is_vi() else "en"), "text/html")
             else:
                 self._send(404, "{}")
 
@@ -542,7 +574,7 @@ def serve(port):
     srv.serve_forever()
 
 
-PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8">
+PAGE = r"""<!doctype html><html lang="__LANG__"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Claude Shepherd</title>
 <style>
@@ -578,36 +610,39 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 .ren{border:none;background:none;padding:0 4px;color:var(--mut);cursor:pointer;font-size:13px}.ren:hover{color:var(--fg)}
 .sub{font-weight:400}
 </style></head><body>
-<header><h1>Claude Shepherd</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
-<label><input type="checkbox" id="all"> hiện phiên đã đóng</label>
-<button onclick="act('ack','all')">Đánh dấu đã xem hết</button></header>
-<main id="m"><div class="empty">Đang tải…</div></main>
+<header><h1>🐑 Claude Shepherd</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
+<label><input type="checkbox" id="all"> <span id="lall"></span></label>
+<button id="ackall" onclick="act('ack','all')"></button></header>
+<main id="m"><div class="empty">…</div></main>
 <script>
-const L={waiting:"CHỜ BẠN",done:"XONG",running:"ĐANG CHẠY",interrupted:"BỊ NGẮT",idle:"MỞ, CHƯA LÀM",closed:"ĐÃ ĐÓNG"};
+const VI=document.documentElement.lang=="vi",t=(en,vi)=>VI?vi:en,LOC=VI?"vi-VN":undefined;
+document.getElementById("lall").textContent=t("show closed sessions","hiện phiên đã đóng");
+document.getElementById("ackall").textContent=t("Mark all seen","Đánh dấu đã xem hết");
+const L={waiting:t("WAITING","CHỜ BẠN"),done:t("DONE","XONG"),running:t("RUNNING","ĐANG CHẠY"),interrupted:t("INTERRUPTED","BỊ NGẮT"),idle:t("OPEN, IDLE","MỞ, CHƯA LÀM"),closed:t("CLOSED","ĐÃ ĐÓNG")};
 const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle"};
-const G=[["Cần bạn xử lý",r=>(r.state=="waiting"||r.state=="done"||r.state=="interrupted")&&!r.seen],
- ["Đang chạy",r=>r.state=="running"],["Chờ bạn",r=>r.state=="waiting"&&r.seen],
- ["Xong / đã xem",r=>(r.state=="done"||r.state=="interrupted")&&r.seen],["Mở, chưa làm gì",r=>r.state=="idle"],["Đã đóng",r=>r.state=="closed"]];
+const G=[[t("Needs you","Cần bạn xử lý"),r=>(r.state=="waiting"||r.state=="done"||r.state=="interrupted")&&!r.seen],
+ [t("Running","Đang chạy"),r=>r.state=="running"],[t("Waiting for you","Chờ bạn"),r=>r.state=="waiting"&&r.seen],
+ [t("Done / seen","Xong / đã xem"),r=>(r.state=="done"||r.state=="interrupted")&&r.seen],[t("Open, idle","Mở, chưa làm gì"),r=>r.state=="idle"],[t("Closed","Đã đóng"),r=>r.state=="closed"]];
 const esc=s=>(s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function ago(t,now){let s=Math.max(0,now-t|0);if(s<60)return s+"s";if(s<3600)return (s/60|0)+"m";if(s<86400)return (s/3600|0)+"h"+String((s%3600/60|0)).padStart(2,"0");return (s/86400|0)+"d"}
 async function act(a,id,extra=""){await fetch(`/api/${a}?id=${encodeURIComponent(id)}${extra}`,{method:"POST",headers:{"X-CCMon":"1"}});load()}
 const ROWS={};
-function ren(id){const r=ROWS[id];const n=prompt("Tên phiên (để trống = dùng tên tự động):",r.name||r.title||"");if(n!==null)act("rename",id,"&name="+encodeURIComponent(n))}
+function ren(id){const r=ROWS[id];const n=prompt(t("Session name (empty = use the automatic name):","Tên phiên (để trống = dùng tên tự động):"),r.name||r.title||"");if(n!==null)act("rename",id,"&name="+encodeURIComponent(n))}
 function qcolor(p){return p>=90?"#e53e3e":p>=70?"var(--wait)":"var(--done)"}
-function rst(t,now){if(!t)return"";const d=t-now;if(d<=0)return"đã reset";const dt=new Date(t*1000);
- return "reset "+(d<86400?dt.toLocaleTimeString("vi-VN",{hour:"2-digit",minute:"2-digit"}):dt.toLocaleString("vi-VN",{weekday:"short",hour:"2-digit",minute:"2-digit"}))}
-function quota(u,now){if(!u||!u.updated)return'<span class="mut">chưa có dữ liệu quota</span>';
- return [["five_hour","5 giờ"],["seven_day","7 ngày"]].filter(([k])=>u[k]).map(([k,l])=>{const v=u[k],p=Math.round(v.used_percentage||0);
- return `<div class="qb" title="cập nhật ${ago(u.updated,now)} trước"><div class="qt"><span>${l} <b style="color:${qcolor(p)}">${p}%</b></span><span class="mut">${rst(v.resets_at,now)}</span></div><div class="bar"><i style="width:${p}%;background:${qcolor(p)}"></i></div></div>`}).join("")}
+function rst(ts,now){if(!ts)return"";const d=ts-now;if(d<=0)return t("reset","đã reset");const dt=new Date(ts*1000);
+ return "reset "+(d<86400?dt.toLocaleTimeString(LOC,{hour:"2-digit",minute:"2-digit"}):dt.toLocaleString(LOC,{weekday:"short",hour:"2-digit",minute:"2-digit"}))}
+function quota(u,now){if(!u||!u.updated)return`<span class="mut">${t("no quota data yet","chưa có dữ liệu quota")}</span>`;
+ return [["five_hour",t("5-hour","5 giờ")],["seven_day",t("7-day","7 ngày")]].filter(([k])=>u[k]).map(([k,l])=>{const v=u[k],p=Math.round(v.used_percentage||0);
+ return `<div class="qb" title="${t("updated "+ago(u.updated,now)+" ago","cập nhật "+ago(u.updated,now)+" trước")}"><div class="qt"><span>${l} <b style="color:${qcolor(p)}">${p}%</b></span><span class="mut">${rst(v.resets_at,now)}</span></div><div class="bar"><i style="width:${p}%;background:${qcolor(p)}"></i></div></div>`}).join("")}
 function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state!="running"&&r.state!="idle";
  let main="";if(r.state=="running")main=r.activity||"";else if(r.state=="waiting")main=r.message||"";else if(r.state=="done")main=r.reply||"";
- const dur=r.state=="running"&&r.turn_started?` · chạy ${ago(r.turn_started,now)}`:"";
+ const dur=r.state=="running"&&r.turn_started?` · ${t("running","chạy")} ${ago(r.turn_started,now)}`:"";
  return `<div class="card ${nw?"new":""}" style="--c:var(--${c});--cb:var(--${c}-bg)">
- <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="Đổi tên" onclick="ren('${r.session_id}')">✎</button></span>
- <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${ago(r.updated,now)} trước${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
- <span class="acts"><button onclick="act('focus','${r.session_id}')">Mở</button>
- ${nw?`<button onclick="act('ack','${r.session_id}')">Đã xem</button>`:""}
- ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">Xóa</button>`:""}</span></div>
+ <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="${t("Rename","Đổi tên")}" onclick="ren('${r.session_id}')">✎</button></span>
+ <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${t(ago(r.updated,now)+" ago",ago(r.updated,now)+" trước")}${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
+ <span class="acts"><button onclick="act('focus','${r.session_id}')">${t("Open","Mở")}</button>
+ ${nw?`<button onclick="act('ack','${r.session_id}')">${t("Seen","Đã xem")}</button>`:""}
+ ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">${t("Remove","Xóa")}</button>`:""}</span></div>
  ${r.last_prompt?`<div class="body q">» ${esc(r.last_prompt)}</div>`:""}
  ${main?`<div class="body">${esc(main)}</div>`:""}</div>`}
 async function load(){try{const all=document.getElementById("all").checked;
@@ -615,10 +650,10 @@ async function load(){try{const all=document.getElementById("all").checked;
  const need=rows.filter(G[0][1]).length,run=rows.filter(r=>r.state=="running").length;
  document.title=(need?`(${need}) `:"")+"Claude Shepherd";
  document.getElementById("quota").innerHTML=quota(d.usage,now);
- document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} cần bạn</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} đang chạy</span> <span class="mut">${rows.length} phiên</span>`;
- const used=new Set();let h="";for(const [t,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
- if(g.length)h+=`<h2>${t} (${g.length})</h2>`+g.map(r=>card(r,now)).join("")}
- document.getElementById("m").innerHTML=h||'<div class="empty">Không có phiên nào. Mở một phiên Claude Code mới để bắt đầu theo dõi.</div>'}catch(e){}}
+ document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} ${t("need you","cần bạn")}</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} ${t("running","đang chạy")}</span> <span class="mut">${rows.length} ${t("sessions","phiên")}</span>`;
+ const used=new Set();let h="";for(const [ti,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
+ if(g.length)h+=`<h2>${ti} (${g.length})</h2>`+g.map(r=>card(r,now)).join("")}
+ document.getElementById("m").innerHTML=h||`<div class="empty">${t("No sessions. Open a new Claude Code session to start tracking.","Không có phiên nào. Mở một phiên Claude Code mới để bắt đầu theo dõi.")}</div>`}catch(e){}}
 document.getElementById("all").onchange=load;load();setInterval(load,2000);
 </script></body></html>"""
 
@@ -642,7 +677,7 @@ def main():
     elif cmd == "watch":
         try:
             while True:
-                sys.stdout.write("\033[H\033[2J" + time.strftime("%H:%M:%S") + "  (Ctrl-C để thoát)\n\n" + render("-a" in a))
+                sys.stdout.write("\033[H\033[2J" + time.strftime("%H:%M:%S") + T("  (Ctrl-C to quit)\n\n", "  (Ctrl-C để thoát)\n\n") + render("-a" in a))
                 sys.stdout.flush()
                 time.sleep(2)
         except KeyboardInterrupt:
@@ -651,13 +686,13 @@ def main():
         try:
             statusline()
         except Exception as e:
-            sys.stdout.write("ccmon statusline lỗi: %s" % e)
+            sys.stdout.write(T("ccmon statusline error: %s", "ccmon statusline lỗi: %s") % e)
     elif cmd == "usage":
         print(render_usage())
     elif cmd == "name" and len(a) > 1:
         s = find(a[1])
         if not s:
-            print("không tìm thấy phiên duy nhất khớp '%s'" % a[1])
+            print(T("no unique session matches '%s'", "không tìm thấy phiên duy nhất khớp '%s'") % a[1])
         else:
             set_name(s["session_id"], " ".join(a[2:]))
             print("%s -> %s" % (s["session_id"][:8], title_of(s)))
@@ -665,9 +700,20 @@ def main():
         serve(int(a[1]) if len(a) > 1 else 7788)
     elif cmd == "focus" and len(a) > 1:
         s = find(a[1])
-        print(focus(s) if s else "không tìm thấy phiên duy nhất khớp '%s'" % a[1])
+        print(focus(s) if s else T("no unique session matches '%s'", "không tìm thấy phiên duy nhất khớp '%s'") % a[1])
     elif cmd == "ack":
         ack(a[1] if len(a) > 1 else "all")
+    elif cmd == "lang":
+        if len(a) > 1 and a[1] in ("en", "vi", "auto"):
+            cfg = read_json(CONFIG, {})
+            if a[1] == "auto":
+                cfg.pop("lang", None)
+            else:
+                cfg["lang"] = a[1]
+            write_json(CONFIG, cfg)
+            global _VI
+            _VI = None
+        print("lang: %s" % ("vi" if is_vi() else "en"))
     elif cmd == "clean":
         procs = ps_table()
         for s in all_sessions():

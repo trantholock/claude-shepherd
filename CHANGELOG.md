@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- English UI (default) alongside Vietnamese, chosen from the macOS language or `ccmon lang en|vi|auto` / `CCMON_LANG`.
+- Demo GIF and screenshot in the README.
+
 ### Changed
 
 - Project renamed to **Claude Shepherd** (repo `claude-shepherd`, app "Claude Shepherd.app", bundle ID `io.github.trantholock.claude-shepherd`). `make install` removes the old "Claude Agents" app and LaunchAgent. The CLI is still `ccmon`.

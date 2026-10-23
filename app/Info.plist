@@ -8,5 +8,5 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>NSAppleEventsUsageDescription</key><string>Để nhảy tới đúng tab iTerm của phiên Claude.</string>
+<key>NSAppleEventsUsageDescription</key><string>Used to jump to the iTerm tab of a Claude session.</string>
 </dict></plist>
