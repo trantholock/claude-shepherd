@@ -544,7 +544,7 @@ def serve(port):
 
 PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude Agents</title>
+<title>Claude Shepherd</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7385;--line:#e3e6ec;
 --wait:#b7791f;--wait-bg:#fdf3e1;--done:#2f855a;--done-bg:#e6f6ec;--run:#2b6cb0;--run-bg:#e6effa;
@@ -578,7 +578,7 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 .ren{border:none;background:none;padding:0 4px;color:var(--mut);cursor:pointer;font-size:13px}.ren:hover{color:var(--fg)}
 .sub{font-weight:400}
 </style></head><body>
-<header><h1>Claude Agents</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
+<header><h1>Claude Shepherd</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
 <label><input type="checkbox" id="all"> hiện phiên đã đóng</label>
 <button onclick="act('ack','all')">Đánh dấu đã xem hết</button></header>
 <main id="m"><div class="empty">Đang tải…</div></main>
@@ -613,7 +613,7 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
 async function load(){try{const all=document.getElementById("all").checked;
  const d=await (await fetch("/api/sessions?all="+(all?1:0))).json();const rows=d.rows,now=d.now;
  const need=rows.filter(G[0][1]).length,run=rows.filter(r=>r.state=="running").length;
- document.title=(need?`(${need}) `:"")+"Claude Agents";
+ document.title=(need?`(${need}) `:"")+"Claude Shepherd";
  document.getElementById("quota").innerHTML=quota(d.usage,now);
  document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} cần bạn</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} đang chạy</span> <span class="mut">${rows.length} phiên</span>`;
  const used=new Set();let h="";for(const [t,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));

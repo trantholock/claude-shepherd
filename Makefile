@@ -18,5 +18,5 @@ check:      ## lint + build thử, giống CI (không cài gì)
 	@if command -v shellcheck >/dev/null; then shellcheck scripts/*.sh; else echo "shellcheck not installed, skipping"; fi
 	plutil -lint app/Info.plist
 	mkdir -p build/check
-	swiftc -swift-version 5 -parse-as-library -target "$$(uname -m)-apple-macosx14.0" app/ClaudeAgents.swift -o build/check/ClaudeAgents
+	swiftc -swift-version 5 -parse-as-library -target "$$(uname -m)-apple-macosx14.0" app/ClaudeShepherd.swift -o build/check/ClaudeShepherd
 	swiftc -swift-version 5 -typecheck app/icon.swift

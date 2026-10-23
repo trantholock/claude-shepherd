@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Project renamed to **Claude Shepherd** (repo `claude-shepherd`, app "Claude Shepherd.app", bundle ID `io.github.trantholock.claude-shepherd`). `make install` removes the old "Claude Agents" app and LaunchAgent. The CLI is still `ccmon`.
+
 ## [1.0.0] - 2026-10-23
 
 ### Added
@@ -20,5 +24,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - LaunchAgent labels and bundle ID renamed from `com.trantho.*` to `io.github.trantholock.*`; `make install` removes the old ones.
 
-[Unreleased]: https://github.com/trantholock/claude-agents/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/trantholock/claude-agents/releases/tag/v1.0.0
+[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/trantholock/claude-shepherd/releases/tag/v1.0.0

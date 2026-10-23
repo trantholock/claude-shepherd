@@ -1,26 +1,26 @@
-# Contributing to Claude Agents
+# Contributing to Claude Shepherd
 
-Thanks for your interest in improving Claude Agents! Issues and pull requests are welcome, in English or Vietnamese.
+Thanks for your interest in improving Claude Shepherd! Issues and pull requests are welcome, in English or Vietnamese.
 
 ## Ways to contribute
 
-- **Report a bug** or **request a feature** via [GitHub Issues](https://github.com/trantholock/claude-agents/issues/new/choose).
+- **Report a bug** or **request a feature** via [GitHub Issues](https://github.com/trantholock/claude-shepherd/issues/new/choose).
 - **Translate** the UI/CLI labels (currently Vietnamese) — English is the most wanted.
 - **Add support** for more terminals/editors in `ccmon focus` (Terminal.app, Ghostty, WezTerm, Cursor, …).
 - **Improve docs** — screenshots and GIFs are especially helpful.
 
-Look for issues labelled [`good first issue`](https://github.com/trantholock/claude-agents/labels/good%20first%20issue) if you're new.
+Look for issues labelled [`good first issue`](https://github.com/trantholock/claude-shepherd/labels/good%20first%20issue) if you're new.
 
 ## Development setup
 
 ```bash
-git clone https://github.com/<you>/claude-agents.git
-cd claude-agents
+git clone https://github.com/<you>/claude-shepherd.git
+cd claude-shepherd
 make install   # symlinks ~/bin/ccmon to your checkout, so CLI/hook edits are live
 ```
 
 - **CLI / hook / web server** — `ccmon/ccmon`, a single file that must only use the Python standard library and stay compatible with the macOS system Python (3.9).
-- **Desktop app** — `app/ClaudeAgents.swift` (SwiftUI, macOS 14+). Rebuild with `make app`.
+- **Desktop app** — `app/ClaudeShepherd.swift` (SwiftUI, macOS 14+). Rebuild with `make app`.
 - **Web dashboard** — served by `ccmon serve`; restart it after changes:
   `launchctl kickstart -k gui/$(id -u)/io.github.trantholock.ccmon`
 

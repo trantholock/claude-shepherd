@@ -1,4 +1,4 @@
-// Claude Agents — menu bar app hiển thị trạng thái các phiên Claude Code (dữ liệu từ `ccmon serve`).
+// Claude Shepherd — menu bar app hiển thị trạng thái các phiên Claude Code (dữ liệu từ `ccmon serve`).
 import AppKit
 import SwiftUI
 
@@ -273,7 +273,7 @@ struct Panel: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Claude Agents").font(.headline)
+                Text("Claude Shepherd").font(.headline)
                 Spacer()
                 Text("\(store.need) cần bạn").font(.system(size: 11, weight: .semibold)).foregroundColor(.orange)
                 Text("· \(store.running) đang chạy").font(.system(size: 11)).foregroundColor(.blue)
@@ -324,7 +324,7 @@ struct Panel: View {
 }
 
 @main
-struct ClaudeAgentsApp: App {
+struct ClaudeShepherdApp: App {
     @StateObject private var store = Store()
 
     // "🟠2 🔵3 · 46% · 81%"
@@ -340,12 +340,12 @@ struct ClaudeAgentsApp: App {
 
     var windowTitle: String {
         let five = store.pct(store.usage?.five_hour), week = store.pct(store.usage?.seven_day)
-        guard five != nil || week != nil else { return "Claude Agents" }
-        return "Claude Agents — 5h \(five.map { "\($0)%" } ?? "?") · 7d \(week.map { "\($0)%" } ?? "?")"
+        guard five != nil || week != nil else { return "Claude Shepherd" }
+        return "Claude Shepherd — 5h \(five.map { "\($0)%" } ?? "?") · 7d \(week.map { "\($0)%" } ?? "?")"
     }
 
     var body: some Scene {
-        Window("Claude Agents", id: "main") {
+        Window("Claude Shepherd", id: "main") {
             Panel(inWindow: true).environmentObject(store)
                 .navigationTitle(windowTitle)
         }

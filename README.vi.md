@@ -1,8 +1,10 @@
-# Claude Agents
+# 🐑 Claude Shepherd
+
+> **Chăn đàn agent Claude Code của bạn.** Chạy 5 phiên cùng lúc? Biết ngay phiên nào đã xong, phiên nào đang chờ cấp quyền, và nhảy thẳng tới đó.
 
 [English](README.md) · **Tiếng Việt**
 
-[![CI](https://github.com/trantholock/claude-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-agents/actions/workflows/ci.yml)
+[![CI](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTerm, VSCode extension, terminal trong VSCode) để không bỏ sót agent nào đã xong hoặc đang chờ bạn.
@@ -10,7 +12,7 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **Hook** của Claude Code ghi trạng thái từng phiên vào `~/.claude/ccmon/sessions/<session_id>.json`
 - **Thông báo macOS** khi agent xong lượt hoặc cần cấp quyền
 - **Dashboard web** http://127.0.0.1:7788
-- **App desktop** "Claude Agents": cửa sổ riêng + badge trên Dock + biểu tượng trên menu bar, bấm vào phiên để nhảy tới đúng tab iTerm / cửa sổ VSCode
+- **App desktop** "Claude Shepherd": cửa sổ riêng + badge trên Dock + biểu tượng trên menu bar, bấm vào phiên để nhảy tới đúng tab iTerm / cửa sổ VSCode
 - **Quota gói Claude** (5 giờ / 7 ngày, giống `/usage`) trên header app, tiêu đề cửa sổ, menu bar, dashboard web và statusLine của Claude Code
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
 - **CLI** `ccmon`
@@ -18,8 +20,8 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 ## Cài đặt
 
 ```bash
-git clone https://github.com/trantholock/claude-agents.git
-cd claude-agents
+git clone https://github.com/trantholock/claude-shepherd.git
+cd claude-shepherd
 make install
 ```
 
@@ -74,7 +76,7 @@ Tắt thông báo macOS: đặt `CCMON_NOTIFY=0` trong môi trường của Clau
 
 ```
 ccmon/ccmon                 CLI + hook + web server (Python stdlib, tương thích 3.9)
-app/ClaudeAgents.swift      app SwiftUI (Window + MenuBarExtra), đọc API của ccmon serve
+app/ClaudeShepherd.swift      app SwiftUI (Window + MenuBarExtra), đọc API của ccmon serve
 app/icon.swift              vẽ icon bằng AppKit -> build/AppIcon.icns
 app/Info.plist
 launchd/*.plist.tmpl        LaunchAgent: ccmon serve + tự mở app khi đăng nhập

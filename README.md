@@ -1,8 +1,10 @@
-# Claude Agents
+# 🐑 Claude Shepherd
+
+> **Herd your Claude Code agents.** Running 5 sessions at once? Know instantly which one is done, which is waiting for permission, and jump straight to it.
 
 **English** · [Tiếng Việt](README.vi.md)
 
-[![CI](https://github.com/trantholock/claude-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-agents/actions/workflows/ci.yml)
+[![CI](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
 
@@ -11,7 +13,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Claude Code hooks** write each session's state to `~/.claude/ccmon/sessions/<session_id>.json`
 - **macOS notifications** when an agent finishes a turn or needs permission
 - **Web dashboard** at http://127.0.0.1:7788
-- **Desktop app** "Claude Agents": its own window, a Dock badge and a menu bar icon; click a session to jump to its iTerm tab or VS Code window
+- **Desktop app** "Claude Shepherd": its own window, a Dock badge and a menu bar icon; click a session to jump to its iTerm tab or VS Code window
 - **Plan quota** (5-hour / 7-day, same as `/usage`) in the app header, window title, menu bar, web dashboard and the Claude Code status line
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **`ccmon` CLI**
@@ -29,8 +31,8 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 ## Install
 
 ```bash
-git clone https://github.com/trantholock/claude-agents.git
-cd claude-agents
+git clone https://github.com/trantholock/claude-shepherd.git
+cd claude-shepherd
 make install     # ccmon + hooks + LaunchAgent + build the app
 ```
 
@@ -91,7 +93,7 @@ To disable macOS notifications, set `CCMON_NOTIFY=0` in Claude Code's environmen
 
 ```
 ccmon/ccmon                 CLI + hook + web server (Python stdlib, 3.9 compatible)
-app/ClaudeAgents.swift      SwiftUI app (Window + MenuBarExtra), reads the ccmon serve API
+app/ClaudeShepherd.swift      SwiftUI app (Window + MenuBarExtra), reads the ccmon serve API
 app/icon.swift              draws the icon with AppKit -> build/AppIcon.icns
 app/Info.plist
 launchd/*.plist.tmpl        LaunchAgents: ccmon serve + open the app at login

@@ -20,11 +20,13 @@ for t in "$ROOT"/launchd/*.plist.tmpl; do
   name="$(basename "$t" .tmpl)"
   sed "s#__HOME__#$HOME#g" "$t" > "$LA/$name"
 done
-# dọn LaunchAgent nhãn cũ (trước v1.0) nếu còn
-for old in com.trantho.ccmon com.trantho.claude-agents; do
+# dọn LaunchAgent + app tên cũ ("Claude Agents") nếu còn
+for old in com.trantho.ccmon com.trantho.claude-agents io.github.trantholock.claude-agents; do
   launchctl bootout "gui/$(id -u)/$old" 2>/dev/null || true
   rm -f "$LA/$old.plist"
 done
+pkill -x ClaudeAgents 2>/dev/null || true
+rm -rf "$HOME/Applications/Claude Agents.app"
 launchctl bootout "gui/$(id -u)/io.github.trantholock.ccmon" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$LA/io.github.trantholock.ccmon.plist"
 
