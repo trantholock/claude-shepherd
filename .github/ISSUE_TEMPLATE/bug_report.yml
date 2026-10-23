@@ -1,0 +1,51 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a Claude Code session in ...
+        2. Run ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      multiple: true
+      options:
+        - CLI (ccmon)
+        - Hook / session state
+        - Web dashboard
+        - Desktop app
+        - Notifications
+        - Quota / statusLine
+        - Install / uninstall
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.1"
+    validations:
+      required: true
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version and host
+      placeholder: "2.1.0, iTerm2 / VS Code extension"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Contents of ~/.claude/ccmon/hook-errors.log or ~/.claude/ccmon/serve.log, if relevant. Remove anything private.
+      render: text

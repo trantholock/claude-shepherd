@@ -1,0 +1,681 @@
+#!/usr/bin/python3
+"""ccmon — theo dõi trạng thái mọi phiên Claude Code (terminal + VSCode).
+
+  ccmon hook            # gọi từ hook của Claude Code (đọc JSON từ stdin)
+  ccmon [ls] [-a]       # bảng trạng thái (-a: gồm cả phiên đã đóng)
+  ccmon watch           # bảng tự làm mới mỗi 2s
+  ccmon serve [port]    # dashboard web http://127.0.0.1:7788
+  ccmon focus <id>      # nhảy tới tab iTerm / cửa sổ VSCode của phiên
+  ccmon ack <id|all>    # đánh dấu đã xem
+  ccmon clean           # xóa phiên đã đóng
+  ccmon name <id> [tên] # đặt tên dễ nhớ cho phiên (bỏ trống tên = xóa)
+  ccmon usage           # quota 5h / 7 ngày của gói Claude
+  ccmon statusline      # gọi từ statusLine của Claude Code: ghi quota + tên phiên
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from urllib.parse import unquote
+
+BASE = os.path.expanduser("~/.claude/ccmon")
+STATE = os.path.join(BASE, "sessions")
+SL_DIR = os.path.join(BASE, "statusline")   # dữ liệu statusLine theo phiên (tách file để không giẫm lên hook)
+NAMES = os.path.join(BASE, "names.json")    # tên do người dùng đặt
+USAGE = os.path.join(BASE, "usage.json")    # quota gần nhất
+KEEP_CLOSED_SEC = 24 * 3600
+NOTIFY = os.environ.get("CCMON_NOTIFY", "1") != "0"
+
+LABEL = {
+    "waiting": "CHỜ BẠN",
+    "done": "XONG",
+    "running": "ĐANG CHẠY",
+    "interrupted": "BỊ NGẮT",
+    "idle": "MỞ, CHƯA LÀM",
+    "closed": "ĐÃ ĐÓNG",
+}
+ORDER = ["waiting", "done", "interrupted", "running", "idle", "closed"]
+
+
+# ---------- lưu trữ ----------
+
+def _path(sid):
+    return os.path.join(STATE, sid + ".json")
+
+
+def load(sid):
+    try:
+        with open(_path(sid)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save(s):
+    os.makedirs(STATE, exist_ok=True)
+    tmp = _path(s["session_id"]) + ".%d.tmp" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(s, f, ensure_ascii=False)
+    os.replace(tmp, _path(s["session_id"]))
+
+
+def read_json(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def set_name(sid, name):
+    names = read_json(NAMES, {})
+    name = (name or "").strip()[:80]
+    if name:
+        names[sid] = name
+    else:
+        names.pop(sid, None)
+    write_json(NAMES, names)
+
+
+def title_of(s, names=None, sl=None):
+    """Tên hiển thị: tên tự đặt > tên Claude tự đặt (session_name) > tên thư mục."""
+    if names is None:
+        names = read_json(NAMES, {})
+    if sl is None:
+        sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
+    return (names.get(s["session_id"]) or sl.get("session_name")
+            or os.path.basename((s.get("cwd") or "").rstrip("/")) or "?")
+
+
+def all_sessions():
+    out = []
+    if not os.path.isdir(STATE):
+        return out
+    for fn in os.listdir(STATE):
+        if fn.endswith(".json"):
+            s = load(fn[:-5])
+            if s:
+                out.append(s)
+    return out
+
+
+def find(prefix):
+    m = [s for s in all_sessions() if s["session_id"].startswith(prefix)]
+    return m[0] if len(m) == 1 else None
+
+
+# ---------- hook ----------
+
+def claude_pid():
+    p = os.environ.get("CLAUDE_PID")
+    if p and p.isdigit():
+        return int(p)
+    pid = os.getppid()
+    for _ in range(5):
+        try:
+            out = subprocess.check_output(["ps", "-o", "ppid=,comm=", "-p", str(pid)], text=True).strip()
+        except Exception:
+            return None
+        ppid, comm = out.split(None, 1)
+        if "claude" in comm.lower() or comm.endswith("node"):
+            return pid
+        pid = int(ppid)
+    return None
+
+
+def host_info():
+    ep = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+    tp = os.environ.get("TERM_PROGRAM", "")
+    if "vscode" in ep:
+        app = "VSCode"
+    elif tp == "vscode":
+        app = "VSCode-term"
+    elif tp == "iTerm.app":
+        app = "iTerm"
+    elif ep in ("sdk-cli", "sdk-ts", "sdk-py") or ep.startswith("sdk"):
+        app = "headless"
+    else:
+        app = tp or ep or "?"
+    # VSCode mở từ iTerm sẽ kế thừa ITERM_SESSION_ID -> bỏ qua để không focus nhầm
+    iterm = "" if app.startswith("VSCode") else os.environ.get("ITERM_SESSION_ID", "")
+    return {"app": app, "entry": ep, "iterm": iterm.split(":", 1)[-1] if iterm else ""}
+
+
+def last_reply(transcript):
+    """Câu trả lời text cuối của assistant trong transcript."""
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 400_000))
+            lines = f.read().decode("utf-8", "ignore").splitlines()
+    except Exception:
+        return ""
+    for ln in reversed(lines):
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if e.get("type") != "assistant":
+            continue
+        for c in reversed((e.get("message") or {}).get("content") or []):
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip():
+                return c["text"].strip()
+    return ""
+
+
+def was_interrupted(transcript):
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 20_000))
+            tail = f.read().decode("utf-8", "ignore").splitlines()[-3:]
+    except Exception:
+        return False
+    return any("Request interrupted by user" in ln for ln in tail)
+
+
+def notify(title, msg):
+    if not NOTIFY:
+        return
+    q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')[:220]
+    script = 'display notification "%s" with title "%s" sound name "Glass"' % (q(msg), q(title))
+    subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def tool_brief(name, inp):
+    inp = inp or {}
+    for k in ("command", "file_path", "pattern", "url", "query", "description", "prompt"):
+        if isinstance(inp.get(k), str):
+            return "%s: %s" % (name, inp[k].replace("\n", " ")[:120])
+    return name
+
+
+def hook():
+    data = json.load(sys.stdin)
+    sid = data.get("session_id")
+    if not sid:
+        return
+    ev = data.get("hook_event_name", "")
+    now = time.time()
+    s = load(sid) or {"session_id": sid, "started": now, "status": "idle", "seen": True}
+    s["cwd"] = data.get("cwd") or s.get("cwd") or os.getcwd()
+    s["transcript"] = data.get("transcript_path") or s.get("transcript", "")
+    if not s.get("pid") or ev == "SessionStart":
+        s["pid"] = claude_pid()
+        s.update(host_info())
+    s["updated"] = now
+    proj = title_of(s)
+
+    if ev == "SessionStart":
+        if s["status"] in ("closed",):
+            s["status"] = "idle"
+    elif ev == "UserPromptSubmit":
+        p = (data.get("prompt") or "").strip()
+        s.setdefault("first_prompt", p[:300])
+        s["last_prompt"] = p[:500]
+        s.update(status="running", seen=False, turn_started=now, message="", activity="")
+    elif ev == "PreToolUse":
+        s.update(status="running", activity=tool_brief(data.get("tool_name", ""), data.get("tool_input")))
+    elif ev == "PostToolUse":
+        s["status"] = "running"
+    elif ev == "Notification":
+        msg = data.get("message", "")
+        ntype = data.get("notification_type", "")
+        if ntype == "idle_prompt" or "waiting for your input" in msg:
+            pass  # nhắc nhở sau khi đã Stop, giữ nguyên trạng thái "done"
+        else:
+            s.update(status="waiting", message=msg, seen=False)
+            notify("⏸ Claude chờ bạn — " + proj, msg)
+    elif ev == "Stop":
+        s.update(status="done", seen=False, message="", activity="",
+                 reply=last_reply(s["transcript"])[:1500], finished=now)
+        dur = now - s.get("turn_started", now)
+        notify("✅ Claude xong — " + proj, "(%s) %s" % (fmt_dur(dur), (s.get("reply") or s.get("last_prompt", ""))[:180]))
+    elif ev == "SessionEnd":
+        s.update(status="closed", reason=data.get("reason", ""))
+    save(s)
+
+
+# ---------- statusLine / quota ----------
+
+def fmt_reset(ts):
+    if not ts:
+        return ""
+    d = ts - time.time()
+    if d <= 0:
+        return "đã reset"
+    if d < 86400:
+        return "reset " + time.strftime("%H:%M", time.localtime(ts))
+    return "reset " + time.strftime("%d/%m %H:%M", time.localtime(ts))
+
+
+def usage():
+    """Quota gần nhất; ô nào đã qua giờ reset thì coi như 0%."""
+    u = read_json(USAGE, {})
+    out = {"updated": u.get("updated"), "model": u.get("model")}
+    for k in ("five_hour", "seven_day"):
+        v = (u.get("rate_limits") or {}).get(k)
+        if not v:
+            continue
+        v = dict(v)
+        if v.get("resets_at") and v["resets_at"] < time.time():
+            v.update(used_percentage=0, expired=True)
+        out[k] = v
+    return out
+
+
+def statusline():
+    data = json.load(sys.stdin)
+    sid = data.get("session_id", "")
+    now = time.time()
+    rl = data.get("rate_limits")
+    if rl:
+        write_json(USAGE, {"rate_limits": rl, "updated": now,
+                           "model": (data.get("model") or {}).get("display_name")})
+    if sid:
+        ctx = data.get("context_window") or {}
+        write_json(os.path.join(SL_DIR, sid + ".json"), {
+            "session_name": data.get("session_name") or "",
+            "model": (data.get("model") or {}).get("display_name"),
+            "ctx_pct": ctx.get("used_percentage"),
+            "cost": (data.get("cost") or {}).get("total_cost_usd"),
+            "updated": now})
+    # dòng hiển thị trong Claude Code
+    parts = []
+    name = read_json(NAMES, {}).get(sid)
+    if name:
+        parts.append("📌 " + name)
+    u = usage()
+    for k, lbl in (("five_hour", "5h"), ("seven_day", "7d")):
+        v = u.get(k)
+        if v:
+            pct = v.get("used_percentage") or 0
+            dot = "🔴" if pct >= 90 else "🟠" if pct >= 70 else "🟢"
+            parts.append("%s %s %d%% (%s)" % (dot, lbl, pct, fmt_reset(v.get("resets_at"))))
+    ctx = (data.get("context_window") or {}).get("used_percentage")
+    if ctx is not None:
+        parts.append("ctx %d%%" % ctx)
+    sys.stdout.write("  ·  ".join(parts))
+
+
+def render_usage():
+    u = usage()
+    if not u.get("updated"):
+        return "Chưa có dữ liệu quota (cần ít nhất 1 phiên Claude Code hiển thị statusLine)."
+    out = []
+    for k, lbl in (("five_hour", "Phiên 5 giờ"), ("seven_day", "Tuần (7 ngày)")):
+        v = u.get(k)
+        if v:
+            pct = v.get("used_percentage") or 0
+            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+            out.append("%-14s %s %3d%%  %s" % (lbl, bar, pct, fmt_reset(v.get("resets_at"))))
+    out.append("(cập nhật %s trước)" % fmt_dur(time.time() - u["updated"]))
+    return "\n".join(out)
+
+
+# ---------- hiển thị ----------
+
+def ps_table():
+    try:
+        out = subprocess.check_output(["ps", "-axo", "pid=,comm="], text=True)
+    except Exception:
+        return {}
+    t = {}
+    for ln in out.splitlines():
+        parts = ln.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            t[int(parts[0])] = parts[1]
+    return t
+
+
+def effective(s, procs):
+    st = s.get("status", "idle")
+    if st == "closed":
+        return st
+    pid = s.get("pid")
+    comm = procs.get(pid, "") if pid else ""
+    if pid and not ("claude" in comm.lower() or comm.endswith("node") or "Code Helper" in comm):
+        return "closed"
+    if st == "running" and time.time() - s.get("updated", 0) > 30 and was_interrupted(s.get("transcript", "")):
+        return "interrupted"
+    return st
+
+
+def snapshot(include_closed=False):
+    procs = ps_table()
+    now = time.time()
+    names = read_json(NAMES, {})
+    rows = []
+    for s in all_sessions():
+        st = effective(s, procs)
+        if st == "closed" and now - s.get("updated", 0) > KEEP_CLOSED_SEC:
+            try:
+                os.remove(_path(s["session_id"]))
+            except OSError:
+                pass
+            continue
+        if st == "closed" and not include_closed:
+            continue
+        sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
+        s["state"] = st
+        s["project"] = os.path.basename((s.get("cwd") or "").rstrip("/"))
+        s["name"] = names.get(s["session_id"], "")
+        s["auto_name"] = sl.get("session_name", "")
+        s["title"] = title_of(s, names, sl)
+        s["model"] = sl.get("model")
+        s["ctx_pct"] = sl.get("ctx_pct")
+        s["cost"] = sl.get("cost")
+        rows.append(s)
+    rows.sort(key=lambda r: (ORDER.index(r["state"]), r.get("seen", True), -r.get("updated", 0)))
+    return rows
+
+
+def fmt_dur(sec):
+    sec = int(max(0, sec))
+    if sec < 60:
+        return "%ds" % sec
+    if sec < 3600:
+        return "%dm" % (sec // 60)
+    if sec < 86400:
+        return "%dh%02dm" % (sec // 3600, sec % 3600 // 60)
+    return "%dd" % (sec // 86400)
+
+
+COLOR = {"waiting": "\033[1;33m", "done": "\033[1;32m", "running": "\033[1;36m",
+         "interrupted": "\033[1;35m", "idle": "\033[37m", "closed": "\033[90m"}
+
+
+def render(include_closed=False):
+    rows = snapshot(include_closed)
+    now = time.time()
+    if not rows:
+        return "Không có phiên Claude nào đang mở (hook chỉ ghi nhận phiên khởi động sau khi cài).\n"
+    width = os.get_terminal_size().columns if sys.stdout.isatty() else 140
+    out = ["%-8s  %-12s %-11s %-24s %6s  %s" % ("ID", "TRẠNG THÁI", "Ở ĐÂU", "PHIÊN", "LÂU", "NỘI DUNG")]
+    for r in rows:
+        st = r["state"]
+        new = st in ("done", "waiting") and not r.get("seen", True)
+        label = ("● " if new else "  ") + LABEL[st]
+        if st == "running":
+            detail = r.get("activity") or r.get("last_prompt", "")
+        elif st == "waiting":
+            detail = r.get("message", "")
+        elif st == "done":
+            detail = "↳ " + (r.get("reply") or "").split("\n")[0]
+        else:
+            detail = r.get("last_prompt") or ""
+        detail = "%s  « %s" % (detail, (r.get("last_prompt") or "")[:60]) if st in ("done", "waiting") else detail
+        line = "%-8s  %-12s %-11s %-24s %6s  %s" % (
+            r["session_id"][:8], label, r.get("app", "?")[:11], r["title"][:24],
+            fmt_dur(now - r.get("updated", now)), detail.replace("\n", " "))
+        out.append(COLOR.get(st, "") + line[:width] + "\033[0m")
+    counts = {}
+    for r in rows:
+        counts[r["state"]] = counts.get(r["state"], 0) + 1
+    out.append("\n" + "  ".join("%s: %d" % (LABEL[k], counts[k]) for k in ORDER if k in counts))
+    out.append(render_usage())
+    return "\n".join(out) + "\n"
+
+
+# ---------- hành động ----------
+
+def ack(target):
+    for s in all_sessions():
+        if target == "all" or s["session_id"].startswith(target):
+            if not s.get("seen"):
+                s["seen"] = True
+                save(s)
+
+
+def forget(sid):
+    try:
+        os.remove(_path(sid))
+    except OSError:
+        pass
+
+
+def vscode_folder(cwd):
+    """Thư mục đang mở trong VSCode chứa cwd (sâu nhất), để focus đúng cửa sổ thay vì mở cửa sổ mới."""
+    st = read_json(os.path.expanduser("~/Library/Application Support/Code/User/globalStorage/storage.json"), {})
+    ws = st.get("windowsState") or {}
+    wins = list(ws.get("openedWindows") or []) + [ws.get("lastActiveWindow") or {}]
+    best = ""
+    for w in wins:
+        f = w.get("folder") or ""
+        if not f.startswith("file://"):
+            continue
+        f = unquote(f[7:]).rstrip("/")
+        if (cwd == f or cwd.startswith(f + "/")) and len(f) > len(best):
+            best = f
+    return best or cwd
+
+
+def focus(s):
+    s["seen"] = True
+    save(s)
+    if s.get("app", "").startswith("VSCode") and s.get("cwd"):
+        code = "/usr/local/bin/code" if os.path.exists("/usr/local/bin/code") else "code"
+        subprocess.run([code, vscode_folder(s["cwd"])])
+        return "ok"
+    if s.get("iterm"):
+        script = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with ss in sessions of t
+        if unique id of ss is "%s" then
+          select w
+          select t
+          select ss
+          activate
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "notfound"''' % s["iterm"]
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        return r.stdout.strip() or r.stderr.strip()
+    return "không biết cách focus app %s" % s.get("app")
+
+
+# ---------- web ----------
+
+def serve(port):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body, ctype="application/json"):
+            b = body.encode() if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(b)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/api/sessions":
+                all_ = parse_qs(u.query).get("all", ["0"])[0] == "1"
+                self._send(200, json.dumps({"now": time.time(), "rows": snapshot(all_), "usage": usage()},
+                                           ensure_ascii=False))
+            elif u.path == "/":
+                self._send(200, PAGE, "text/html")
+            else:
+                self._send(404, "{}")
+
+        def do_POST(self):
+            # chỉ nhận request từ chính trang dashboard
+            if self.headers.get("X-CCMon") != "1":
+                return self._send(403, "{}")
+            u = urlparse(self.path)
+            q = parse_qs(u.query)
+            sid = q.get("id", [""])[0]
+            res = "ok"
+            if u.path == "/api/ack":
+                ack(sid or "all")
+            elif u.path == "/api/rename":
+                set_name(sid, q.get("name", [""])[0])
+            elif u.path == "/api/forget":
+                forget(sid)
+            elif u.path == "/api/focus":
+                s = load(sid)
+                res = focus(s) if s else "notfound"
+            self._send(200, json.dumps({"result": res}))
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    print("ccmon dashboard: http://127.0.0.1:%d" % port, flush=True)
+    srv.serve_forever()
+
+
+PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Agents</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7385;--line:#e3e6ec;
+--wait:#b7791f;--wait-bg:#fdf3e1;--done:#2f855a;--done-bg:#e6f6ec;--run:#2b6cb0;--run-bg:#e6effa;
+--int:#97266d;--int-bg:#fbe9f3;--idle:#6b7385;--idle-bg:#eef0f4}
+@media (prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1a1e26;--fg:#e4e7ee;--mut:#8b93a5;--line:#2a2f3a;
+--wait:#f6c063;--wait-bg:#3a2e17;--done:#68d391;--done-bg:#173226;--run:#7fb3f0;--run-bg:#18283d;
+--int:#f08ac1;--int-bg:#3a1a2c;--idle:#8b93a5;--idle-bg:#232834}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+h1{font-size:17px;margin:0 8px 0 0}
+.pill{padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
+.sp{flex:1}
+button{font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--mut)}
+main{padding:16px 20px;max-width:1200px;margin:0 auto}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:20px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);border-radius:8px;padding:10px 14px;margin-bottom:8px}
+.card.new{box-shadow:0 0 0 2px var(--c) inset}
+.row{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.proj{font-weight:600}.mut{color:var(--mut);font-size:12px}
+.st{font-size:11px;font-weight:700;padding:1px 8px;border-radius:99px;color:var(--c);background:var(--cb)}
+.body{margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:7.5em;overflow:hidden}
+.body.q{color:var(--mut)}
+.acts{margin-left:auto;display:flex;gap:6px}
+.empty{color:var(--mut);padding:40px;text-align:center}
+label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
+.q{display:flex;gap:14px;align-items:center;font-size:12px}
+.qb{display:flex;flex-direction:column;gap:2px;min-width:150px}
+.qt{display:flex;justify-content:space-between;gap:8px}.qt b{font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.bar i{display:block;height:100%;border-radius:3px}
+.ren{border:none;background:none;padding:0 4px;color:var(--mut);cursor:pointer;font-size:13px}.ren:hover{color:var(--fg)}
+.sub{font-weight:400}
+</style></head><body>
+<header><h1>Claude Agents</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
+<label><input type="checkbox" id="all"> hiện phiên đã đóng</label>
+<button onclick="act('ack','all')">Đánh dấu đã xem hết</button></header>
+<main id="m"><div class="empty">Đang tải…</div></main>
+<script>
+const L={waiting:"CHỜ BẠN",done:"XONG",running:"ĐANG CHẠY",interrupted:"BỊ NGẮT",idle:"MỞ, CHƯA LÀM",closed:"ĐÃ ĐÓNG"};
+const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle"};
+const G=[["Cần bạn xử lý",r=>(r.state=="waiting"||r.state=="done"||r.state=="interrupted")&&!r.seen],
+ ["Đang chạy",r=>r.state=="running"],["Chờ bạn",r=>r.state=="waiting"&&r.seen],
+ ["Xong / đã xem",r=>(r.state=="done"||r.state=="interrupted")&&r.seen],["Mở, chưa làm gì",r=>r.state=="idle"],["Đã đóng",r=>r.state=="closed"]];
+const esc=s=>(s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function ago(t,now){let s=Math.max(0,now-t|0);if(s<60)return s+"s";if(s<3600)return (s/60|0)+"m";if(s<86400)return (s/3600|0)+"h"+String((s%3600/60|0)).padStart(2,"0");return (s/86400|0)+"d"}
+async function act(a,id,extra=""){await fetch(`/api/${a}?id=${encodeURIComponent(id)}${extra}`,{method:"POST",headers:{"X-CCMon":"1"}});load()}
+const ROWS={};
+function ren(id){const r=ROWS[id];const n=prompt("Tên phiên (để trống = dùng tên tự động):",r.name||r.title||"");if(n!==null)act("rename",id,"&name="+encodeURIComponent(n))}
+function qcolor(p){return p>=90?"#e53e3e":p>=70?"var(--wait)":"var(--done)"}
+function rst(t,now){if(!t)return"";const d=t-now;if(d<=0)return"đã reset";const dt=new Date(t*1000);
+ return "reset "+(d<86400?dt.toLocaleTimeString("vi-VN",{hour:"2-digit",minute:"2-digit"}):dt.toLocaleString("vi-VN",{weekday:"short",hour:"2-digit",minute:"2-digit"}))}
+function quota(u,now){if(!u||!u.updated)return'<span class="mut">chưa có dữ liệu quota</span>';
+ return [["five_hour","5 giờ"],["seven_day","7 ngày"]].filter(([k])=>u[k]).map(([k,l])=>{const v=u[k],p=Math.round(v.used_percentage||0);
+ return `<div class="qb" title="cập nhật ${ago(u.updated,now)} trước"><div class="qt"><span>${l} <b style="color:${qcolor(p)}">${p}%</b></span><span class="mut">${rst(v.resets_at,now)}</span></div><div class="bar"><i style="width:${p}%;background:${qcolor(p)}"></i></div></div>`}).join("")}
+function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state!="running"&&r.state!="idle";
+ let main="";if(r.state=="running")main=r.activity||"";else if(r.state=="waiting")main=r.message||"";else if(r.state=="done")main=r.reply||"";
+ const dur=r.state=="running"&&r.turn_started?` · chạy ${ago(r.turn_started,now)}`:"";
+ return `<div class="card ${nw?"new":""}" style="--c:var(--${c});--cb:var(--${c}-bg)">
+ <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="Đổi tên" onclick="ren('${r.session_id}')">✎</button></span>
+ <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${ago(r.updated,now)} trước${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
+ <span class="acts"><button onclick="act('focus','${r.session_id}')">Mở</button>
+ ${nw?`<button onclick="act('ack','${r.session_id}')">Đã xem</button>`:""}
+ ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">Xóa</button>`:""}</span></div>
+ ${r.last_prompt?`<div class="body q">» ${esc(r.last_prompt)}</div>`:""}
+ ${main?`<div class="body">${esc(main)}</div>`:""}</div>`}
+async function load(){try{const all=document.getElementById("all").checked;
+ const d=await (await fetch("/api/sessions?all="+(all?1:0))).json();const rows=d.rows,now=d.now;
+ const need=rows.filter(G[0][1]).length,run=rows.filter(r=>r.state=="running").length;
+ document.title=(need?`(${need}) `:"")+"Claude Agents";
+ document.getElementById("quota").innerHTML=quota(d.usage,now);
+ document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} cần bạn</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} đang chạy</span> <span class="mut">${rows.length} phiên</span>`;
+ const used=new Set();let h="";for(const [t,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
+ if(g.length)h+=`<h2>${t} (${g.length})</h2>`+g.map(r=>card(r,now)).join("")}
+ document.getElementById("m").innerHTML=h||'<div class="empty">Không có phiên nào. Mở một phiên Claude Code mới để bắt đầu theo dõi.</div>'}catch(e){}}
+document.getElementById("all").onchange=load;load();setInterval(load,2000);
+</script></body></html>"""
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "ls"
+    if cmd == "hook":
+        try:
+            hook()
+        except Exception as e:  # không bao giờ làm hỏng phiên Claude
+            try:
+                os.makedirs(STATE, exist_ok=True)
+                with open(os.path.join(STATE, "..", "hook-errors.log"), "a") as f:
+                    f.write("%s %r\n" % (time.strftime("%F %T"), e))
+            except Exception:
+                pass
+        return
+    if cmd in ("ls", "-a"):
+        sys.stdout.write(render("-a" in a))
+    elif cmd == "watch":
+        try:
+            while True:
+                sys.stdout.write("\033[H\033[2J" + time.strftime("%H:%M:%S") + "  (Ctrl-C để thoát)\n\n" + render("-a" in a))
+                sys.stdout.flush()
+                time.sleep(2)
+        except KeyboardInterrupt:
+            pass
+    elif cmd == "statusline":
+        try:
+            statusline()
+        except Exception as e:
+            sys.stdout.write("ccmon statusline lỗi: %s" % e)
+    elif cmd == "usage":
+        print(render_usage())
+    elif cmd == "name" and len(a) > 1:
+        s = find(a[1])
+        if not s:
+            print("không tìm thấy phiên duy nhất khớp '%s'" % a[1])
+        else:
+            set_name(s["session_id"], " ".join(a[2:]))
+            print("%s -> %s" % (s["session_id"][:8], title_of(s)))
+    elif cmd == "serve":
+        serve(int(a[1]) if len(a) > 1 else 7788)
+    elif cmd == "focus" and len(a) > 1:
+        s = find(a[1])
+        print(focus(s) if s else "không tìm thấy phiên duy nhất khớp '%s'" % a[1])
+    elif cmd == "ack":
+        ack(a[1] if len(a) > 1 else "all")
+    elif cmd == "clean":
+        procs = ps_table()
+        for s in all_sessions():
+            if effective(s, procs) == "closed":
+                forget(s["session_id"])
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()
