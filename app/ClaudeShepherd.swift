@@ -18,7 +18,9 @@ struct Row: Codable, Identifiable {
     let auto_name: String?
     let title: String?
     let ctx_pct: Int?
+    let remote: String?
     var id: String { session_id }
+    var isRemote: Bool { !(remote ?? "").isEmpty }
     var displayTitle: String { title ?? project ?? "?" }
     var hasCustomName: Bool { !(name ?? "").isEmpty }
     var isNew: Bool { ["waiting", "done", "interrupted"].contains(state) && !(seen ?? true) }
@@ -115,10 +117,15 @@ final class Store: ObservableObject {
     }
 
     // chạy focus từ chính app để quyền Automation (iTerm) gắn với app này
-    func focus(_ id: String) {
+    func focus(_ id: String) { ccmon("focus", id) }
+
+    // claude --resume trong tab iTerm mới (fork nếu phiên còn sống nơi khác, vd Remote Control)
+    func term(_ id: String) { ccmon("term", id) }
+
+    private func ccmon(_ cmd: String, _ id: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        p.arguments = [NSHomeDirectory() + "/bin/ccmon", "focus", id]
+        p.arguments = [NSHomeDirectory() + "/bin/ccmon", cmd, id]
         p.terminationHandler = { _ in DispatchQueue.main.async { self.refresh() } }
         try? p.run()
     }
@@ -203,9 +210,16 @@ struct RowView: View {
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .onTapGesture { store.focus(r.session_id) }
-        .help(t("Click to open this session's tab/window", "Bấm để mở tab/cửa sổ của phiên này"))
+        .help(r.isRemote ? t("Session from mobile (Remote Control) — click to resume it in an iTerm tab", "Phiên mở từ mobile (Remote Control) — bấm để resume trong tab iTerm")
+                         : t("Click to open this session's tab/window", "Bấm để mở tab/cửa sổ của phiên này"))
         .contextMenu {
-            Button(t("Open session", "Mở phiên")) { store.focus(r.session_id) }
+            Button(r.isRemote ? t("Resume in Terminal", "Resume trong Terminal") : t("Open session", "Mở phiên")) { store.focus(r.session_id) }
+            if r.isRemote, let u = URL(string: r.remote ?? "") {
+                Button(t("Open on web (claude.ai)", "Mở trên web (claude.ai)")) { NSWorkspace.shared.open(u) }
+            }
+            if r.state == "closed" {
+                Button(t("Resume in Terminal", "Mở lại trong Terminal")) { store.term(r.session_id) }
+            }
             Button(t("Rename…", "Đổi tên…")) { store.rename(r) }
             if r.isNew { Button(t("Mark as seen", "Đánh dấu đã xem")) { store.act("ack", r.session_id) } }
             Button("Copy session ID") {

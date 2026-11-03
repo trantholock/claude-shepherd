@@ -5,7 +5,8 @@
   ccmon [ls] [-a]       # status table (-a: include closed sessions)
   ccmon watch           # table that refreshes every 2s
   ccmon serve [port]    # web dashboard http://127.0.0.1:7788
-  ccmon focus <id>      # jump to the session's iTerm tab / VS Code window
+  ccmon focus <id>      # jump to the session's iTerm tab / VS Code window (Remote Control: claude.ai/code)
+  ccmon term <id>       # open the session in a new iTerm tab (claude --resume; --fork-session if still live)
   ccmon ack <id|all>    # mark as seen
   ccmon clean           # delete closed sessions
   ccmon name <id> [name] # give a session a memorable name (empty = clear)
@@ -15,6 +16,9 @@
 """
 import json
 import os
+import re
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -162,6 +166,19 @@ def claude_pid():
     return None
 
 
+def remote_url_of_pid(pid):
+    """Phiên do `claude remote-control` sinh ra (mở từ app mobile/claude.ai) chạy với
+    --sdk-url .../code/sessions/cse_XXX -> trang web https://claude.ai/code/session_XXX."""
+    if not pid:
+        return ""
+    try:
+        args = subprocess.check_output(["ps", "-o", "args=", "-p", str(pid)], text=True)
+    except Exception:
+        return ""
+    m = re.search(r"/code/sessions/cse_([A-Za-z0-9]+)", args)
+    return "https://claude.ai/code/session_" + m.group(1) if m else ""
+
+
 def host_info():
     ep = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
     tp = os.environ.get("TERM_PROGRAM", "")
@@ -242,6 +259,9 @@ def hook():
     if not s.get("pid") or ev == "SessionStart":
         s["pid"] = claude_pid()
         s.update(host_info())
+        s["remote"] = remote_url_of_pid(s["pid"])
+        if s["remote"]:
+            s["app"] = "Remote"
     s["updated"] = now
     proj = title_of(s)
 
@@ -396,6 +416,10 @@ def snapshot(include_closed=False):
             continue
         if st == "closed" and not include_closed:
             continue
+        if "remote" not in s and s.get("app") == "headless" and st != "closed":
+            s["remote"] = remote_url_of_pid(s.get("pid"))  # phiên ghi trước khi có nhận diện Remote
+            if s["remote"]:
+                s["app"] = "Remote"
         sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
         s["state"] = st
         s["project"] = os.path.basename((s.get("cwd") or "").rstrip("/"))
@@ -494,6 +518,8 @@ def vscode_folder(cwd):
 def focus(s):
     s["seen"] = True
     save(s)
+    if s.get("remote") or (s.get("app") == "headless" and remote_url_of_pid(s.get("pid"))):
+        return term(s)  # phiên mở từ mobile: không có tab nào để focus -> resume trong iTerm
     if s.get("app", "").startswith("VSCode") and s.get("cwd"):
         code = "/usr/local/bin/code" if os.path.exists("/usr/local/bin/code") else "code"
         subprocess.run([code, vscode_folder(s["cwd"])])
@@ -519,6 +545,55 @@ return "notfound"''' % s["iterm"]
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
         return r.stdout.strip() or r.stderr.strip()
     return T("don't know how to focus app %s", "không biết cách focus app %s") % s.get("app")
+
+
+ITERM_NEW_TAB = '''
+on run argv
+  set cmd to item 1 of argv
+  tell application "iTerm2"
+    activate
+    if (count of windows) = 0 then
+      create window with default profile command cmd
+    else
+      tell current window to create tab with default profile command cmd
+    end if
+  end tell
+  return "ok"
+end run'''
+
+
+def term(s):
+    """Mở phiên trong tab iTerm mới bằng `claude --resume <id>`.
+    - Phiên Remote Control đang rảnh (xong/idle): dừng tiến trình chạy ngầm của remote-control
+      rồi resume đúng phiên -> chuyển hẳn phiên sang terminal, không có 2 tiến trình cùng ghi.
+    - Phiên còn đang làm việc (running/waiting) hoặc đang mở ở tab khác: --fork-session
+      (bản sao đủ lịch sử) để không làm gián đoạn nó."""
+    s["seen"] = True
+    save(s)
+    st = effective(s, ps_table())
+    remote = s.get("remote") or (remote_url_of_pid(s.get("pid")) if s.get("app") == "headless" else "")
+    fork = False
+    if st != "closed":
+        if remote and st not in ("running", "waiting") and remote_url_of_pid(s.get("pid")):
+            pid = s["pid"]
+            try:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(30):
+                    time.sleep(0.1)
+                    os.kill(pid, 0)
+            except OSError:
+                pass  # đã thoát
+            else:
+                fork = True  # không dừng được -> fork cho an toàn
+        else:
+            fork = True
+    cmd = "cd %s && claude --resume %s%s" % (shlex.quote(s.get("cwd") or os.path.expanduser("~")),
+                                            s["session_id"], " --fork-session" if fork else "")
+    # chạy lệnh trực tiếp khi tạo tab (không "write text" vì gõ phím lúc zsh chưa sẵn sàng bị lẫn ký tự),
+    # xong thì thả về zsh để tab không tự đóng
+    shell = "/bin/zsh -lic %s" % shlex.quote(cmd + "; exec /bin/zsh -l")
+    r = subprocess.run(["osascript", "-e", ITERM_NEW_TAB, shell], capture_output=True, text=True)
+    return r.stdout.strip() or r.stderr.strip()
 
 
 # ---------- web ----------
@@ -567,6 +642,9 @@ def serve(port):
             elif u.path == "/api/focus":
                 s = load(sid)
                 res = focus(s) if s else "notfound"
+            elif u.path == "/api/term":
+                s = load(sid)
+                res = term(s) if s else "notfound"
             self._send(200, json.dumps({"result": res}))
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
@@ -640,7 +718,9 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
  return `<div class="card ${nw?"new":""}" style="--c:var(--${c});--cb:var(--${c}-bg)">
  <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="${t("Rename","Đổi tên")}" onclick="ren('${r.session_id}')">✎</button></span>
  <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${t(ago(r.updated,now)+" ago",ago(r.updated,now)+" trước")}${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
- <span class="acts"><button onclick="act('focus','${r.session_id}')">${t("Open","Mở")}</button>
+ <span class="acts"><button onclick="act('focus','${r.session_id}')">${r.remote?"Terminal":t("Open","Mở")}</button>
+ ${r.remote?`<button onclick="window.open('${r.remote}')">Web</button>`:""}
+ ${r.state=="closed"?`<button onclick="act('term','${r.session_id}')" title="${t("claude --resume in a new iTerm tab","claude --resume trong tab iTerm mới")}">Terminal</button>`:""}
  ${nw?`<button onclick="act('ack','${r.session_id}')">${t("Seen","Đã xem")}</button>`:""}
  ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">${t("Remove","Xóa")}</button>`:""}</span></div>
  ${r.last_prompt?`<div class="body q">» ${esc(r.last_prompt)}</div>`:""}
@@ -701,6 +781,9 @@ def main():
     elif cmd == "focus" and len(a) > 1:
         s = find(a[1])
         print(focus(s) if s else T("no unique session matches '%s'", "không tìm thấy phiên duy nhất khớp '%s'") % a[1])
+    elif cmd == "term" and len(a) > 1:
+        s = find(a[1])
+        print(term(s) if s else T("no unique session matches '%s'", "không tìm thấy phiên duy nhất khớp '%s'") % a[1])
     elif cmd == "ack":
         ack(a[1] if len(a) > 1 else "all")
     elif cmd == "lang":
