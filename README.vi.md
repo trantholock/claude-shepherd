@@ -18,6 +18,7 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **Quota gói Claude** (5 giờ / 7 ngày, giống `/usage`) trên header app, tiêu đề cửa sổ, menu bar, dashboard web và statusLine của Claude Code
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
 - **Phiên Remote Control** mở từ điện thoại hoặc claude.ai: bấm một lần để resume trong tab iTerm (xem [bên dưới](#phiên-remote-control))
+- **Tìm kiếm** phiên theo tên, thư mục, prompt, câu trả lời hoặc ID — không phân biệt dấu, mọi từ phải khớp (dashboard: `/` để focus, Esc để xoá; app: ⌘F; CLI: `ccmon ls [-a] <từ khoá>`)
 - **CLI** `ccmon`
 
 ## Cài đặt
@@ -67,7 +68,7 @@ Muốn mở trên trình duyệt thì dùng nút **Web** trên dashboard, hoặc
 ## CLI
 
 ```
-ccmon [ls] [-a]       bảng trạng thái (-a gồm cả phiên đã đóng)
+ccmon [ls] [-a] [từ]  bảng trạng thái (-a gồm cả phiên đã đóng; từ = lọc theo từ khoá)
 ccmon watch           bảng tự làm mới 2s
 ccmon serve [port]    dashboard web (mặc định 7788)
 ccmon focus <id>      nhảy tới tab iTerm / cửa sổ VSCode của phiên (Remote: resume trong iTerm)

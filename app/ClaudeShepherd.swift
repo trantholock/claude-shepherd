@@ -19,11 +19,24 @@ struct Row: Codable, Identifiable {
     let title: String?
     let ctx_pct: Int?
     let remote: String?
+    let cwd: String?
+    let model: String?
     var id: String { session_id }
     var isRemote: Bool { !(remote ?? "").isEmpty }
     var displayTitle: String { title ?? project ?? "?" }
     var hasCustomName: Bool { !(name ?? "").isEmpty }
     var isNew: Bool { ["waiting", "done", "interrupted"].contains(state) && !(seen ?? true) }
+    // cùng các trường với SEARCH_FIELDS trong ccmon
+    var haystack: String {
+        fold([title, name, auto_name, project, cwd, app, session_id, last_prompt, reply, message, activity, model]
+            .compactMap { $0 }.joined(separator: " "))
+    }
+    func matches(_ words: [String]) -> Bool { let h = haystack; return words.allSatisfy { h.contains($0) } }
+}
+
+// chữ thường + bỏ dấu ("Đổi" -> "doi"), giống fold() trong ccmon
+func fold(_ s: String) -> String {
+    s.lowercased().replacingOccurrences(of: "đ", with: "d").folding(options: .diacriticInsensitive, locale: nil)
 }
 
 struct Limit: Codable { let used_percentage: Double?; let resets_at: Double? }
@@ -73,6 +86,9 @@ final class Store: ObservableObject {
     @Published var online = true
     @Published var usage: Usage?
     @Published var showClosed = false { didSet { refresh() } }
+    @Published var query = ""
+    var words: [String] { fold(query).split(whereSeparator: \.isWhitespace).map(String.init) }
+    var visible: [Row] { words.isEmpty ? rows : rows.filter { $0.matches(words) } }
     private let base = "http://127.0.0.1:7788"
     private var timer: Timer?
 
@@ -277,6 +293,7 @@ struct QuotaView: View {
 struct Panel: View {
     @EnvironmentObject var store: Store
     @Environment(\.openWindow) private var openWindow
+    @FocusState private var searchFocused: Bool
     var inWindow = false
 
     var groups: [(String, [Row])] {
@@ -291,7 +308,7 @@ struct Panel: View {
         ]
         var out: [(String, [Row])] = []
         for (title, f) in defs {
-            let g = store.rows.filter { !used.contains($0.id) && f($0) }
+            let g = store.visible.filter { !used.contains($0.id) && f($0) }
             g.forEach { used.insert($0.id) }
             if !g.isEmpty { out.append((title, g)) }
         }
@@ -311,12 +328,33 @@ struct Panel: View {
             }
             .padding(12)
             QuotaView()
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                TextField(t("Search name, folder, prompt, reply…", "Tìm theo tên, thư mục, prompt, trả lời…"), text: $store.query)
+                    .textFieldStyle(.plain).focused($searchFocused)
+                    .onExitCommand { store.query = ""; searchFocused = false }
+                if !store.query.isEmpty {
+                    Text("\(store.visible.count)/\(store.rows.count)").font(.system(size: 11)).foregroundColor(.secondary)
+                    Button { store.query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless).foregroundColor(.secondary).help(t("Clear search (Esc)", "Xoá tìm kiếm (Esc)"))
+                }
+                // ⌘F để focus ô tìm kiếm
+                Button("") { searchFocused = true }.keyboardShortcut("f", modifiers: .command).hidden().frame(width: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+            .padding(.horizontal, 10).padding(.bottom, 8)
             Divider()
             if !store.online {
                 VStack(spacing: 8) {
                     Text(t("Can't reach ccmon (127.0.0.1:7788)", "Không kết nối được ccmon (127.0.0.1:7788)")).foregroundColor(.secondary)
                     Button(t("Restart ccmon serve", "Khởi động lại ccmon serve")) { store.startServer() }
                 }.frame(maxWidth: .infinity, minHeight: 120)
+            } else if store.visible.isEmpty && !store.rows.isEmpty {
+                Text(t("No sessions match \"\(store.query)\"", "Không có phiên nào khớp \"\(store.query)\"") +
+                     (store.showClosed ? "" : t("\nTick “Show closed sessions” to search those too.", "\nBật “Hiện phiên đã đóng” để tìm cả phiên đã đóng.")))
+                    .multilineTextAlignment(.center).foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120)
             } else if store.rows.isEmpty {
                 Text(t("No sessions.\nOpen a Claude Code session to start tracking.",
                        "Không có phiên nào.\nMở một phiên Claude Code để bắt đầu theo dõi."))

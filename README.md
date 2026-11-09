@@ -19,6 +19,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Plan quota** (5-hour / 7-day, same as `/usage`) in the app header, window title, menu bar, web dashboard and the Claude Code status line
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **Remote Control sessions** started from your phone or claude.ai can be resumed in an iTerm tab with one click (see [below](#remote-control-sessions))
+- **Search** sessions by name, folder, prompt, reply or ID — accent-insensitive, every word must match (dashboard: `/` to focus, Esc to clear; app: ⌘F; CLI: `ccmon ls [-a] <text>`)
 - **`ccmon` CLI**
 
 - **English and Vietnamese** UI — more translations welcome
@@ -83,7 +84,7 @@ To keep `claude remote-control` running all the time, start it from a LaunchAgen
 ## CLI
 
 ```
-ccmon [ls] [-a]        status table (-a includes closed sessions)
+ccmon [ls] [-a] [text] status table (-a includes closed sessions; text filters it)
 ccmon watch            table that refreshes every 2s
 ccmon serve [port]     web dashboard (default 7788)
 ccmon focus <id>       jump to the session's iTerm tab / VS Code window (Remote: resume in iTerm)

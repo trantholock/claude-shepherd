@@ -2,7 +2,7 @@
 """ccmon — track every Claude Code session (terminal + VS Code).
 
   ccmon hook            # called by Claude Code hooks (reads JSON from stdin)
-  ccmon [ls] [-a]       # status table (-a: include closed sessions)
+  ccmon [ls] [-a] [text] # status table (-a: include closed sessions; text: search)
   ccmon watch           # table that refreshes every 2s
   ccmon serve [port]    # web dashboard http://127.0.0.1:7788
   ccmon focus <id>      # jump to the session's iTerm tab / VS Code window (Remote Control: claude.ai/code)
@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.parse import unquote
 
 BASE = os.path.expanduser("~/.claude/ccmon")
@@ -434,6 +435,22 @@ def snapshot(include_closed=False):
     return rows
 
 
+SEARCH_FIELDS = ("title", "name", "auto_name", "project", "cwd", "app", "session_id",
+                 "last_prompt", "reply", "message", "activity", "model")
+
+
+def fold(s):
+    """Chữ thường + bỏ dấu (tiếng Việt: "Đổi" -> "doi") để tìm không phân biệt dấu."""
+    s = unicodedata.normalize("NFD", str(s or "").lower().replace("đ", "d"))
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def matches(r, query):
+    """Mọi từ trong query phải xuất hiện ở ít nhất một trường (AND, không phân biệt hoa thường/dấu)."""
+    hay = fold(" ".join(str(r.get(k) or "") for k in SEARCH_FIELDS))
+    return all(w in hay for w in fold(query).split())
+
+
 def fmt_dur(sec):
     sec = int(max(0, sec))
     if sec < 60:
@@ -449,9 +466,12 @@ COLOR = {"waiting": "\033[1;33m", "done": "\033[1;32m", "running": "\033[1;36m",
          "interrupted": "\033[1;35m", "idle": "\033[37m", "closed": "\033[90m"}
 
 
-def render(include_closed=False):
-    rows = snapshot(include_closed)
+def render(include_closed=False, query=""):
+    rows = [r for r in snapshot(include_closed) if matches(r, query)]
     now = time.time()
+    if not rows and query:
+        return T("No sessions match '%s'%s.\n", "Không có phiên nào khớp '%s'%s.\n") % (
+            query, "" if include_closed else T(" (add -a to include closed sessions)", " (thêm -a để tìm cả phiên đã đóng)"))
     if not rows:
         return T("No open Claude sessions (the hook only sees sessions started after install).\n",
                  "Không có phiên Claude nào đang mở (hook chỉ ghi nhận phiên khởi động sau khi cài).\n")
@@ -687,14 +707,23 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.bar i{display:block;height:100%;border-radius:3px}
 .ren{border:none;background:none;padding:0 4px;color:var(--mut);cursor:pointer;font-size:13px}.ren:hover{color:var(--fg)}
 .sub{font-weight:400}
+#q{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);width:220px}
+#q:focus{outline:none;border-color:var(--run)}
 </style></head><body>
 <header><h1>🐑 Claude Shepherd</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
+<input type="search" id="q" autocomplete="off">
 <label><input type="checkbox" id="all"> <span id="lall"></span></label>
 <button id="ackall" onclick="act('ack','all')"></button></header>
 <main id="m"><div class="empty">…</div></main>
 <script>
 const VI=document.documentElement.lang=="vi",t=(en,vi)=>VI?vi:en,LOC=VI?"vi-VN":undefined;
 document.getElementById("lall").textContent=t("show closed sessions","hiện phiên đã đóng");
+const Q=document.getElementById("q");Q.placeholder=t("Search sessions  ( / )","Tìm phiên  ( / )");
+Q.value=new URLSearchParams(location.hash.slice(1)).get("q")||"";
+// giống fold()/matches() trong ccmon: bỏ dấu, không phân biệt hoa thường, mọi từ phải khớp
+const fold=s=>String(s||"").toLowerCase().replace(/đ/g,"d").normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+const SF=["title","name","auto_name","project","cwd","app","session_id","last_prompt","reply","message","activity","model"];
+const match=(r,ws)=>{const h=fold(SF.map(k=>r[k]||"").join(" "));return ws.every(w=>h.includes(w))};
 document.getElementById("ackall").textContent=t("Mark all seen","Đánh dấu đã xem hết");
 const L={waiting:t("WAITING","CHỜ BẠN"),done:t("DONE","XONG"),running:t("RUNNING","ĐANG CHẠY"),interrupted:t("INTERRUPTED","BỊ NGẮT"),idle:t("OPEN, IDLE","MỞ, CHƯA LÀM"),closed:t("CLOSED","ĐÃ ĐÓNG")};
 const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle"};
@@ -725,15 +754,24 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
  ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">${t("Remove","Xóa")}</button>`:""}</span></div>
  ${r.last_prompt?`<div class="body q">» ${esc(r.last_prompt)}</div>`:""}
  ${main?`<div class="body">${esc(main)}</div>`:""}</div>`}
+let LAST=null;
 async function load(){try{const all=document.getElementById("all").checked;
- const d=await (await fetch("/api/sessions?all="+(all?1:0))).json();const rows=d.rows,now=d.now;
+ LAST=await (await fetch("/api/sessions?all="+(all?1:0))).json();draw()}catch(e){}}
+function draw(){if(!LAST)return;const d=LAST,all=document.getElementById("all").checked,ws=fold(Q.value).split(/\s+/).filter(Boolean);
+ const now=d.now,rows=ws.length?d.rows.filter(r=>match(r,ws)):d.rows;
  const need=rows.filter(G[0][1]).length,run=rows.filter(r=>r.state=="running").length;
  document.title=(need?`(${need}) `:"")+"Claude Shepherd";
  document.getElementById("quota").innerHTML=quota(d.usage,now);
- document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} ${t("need you","cần bạn")}</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} ${t("running","đang chạy")}</span> <span class="mut">${rows.length} ${t("sessions","phiên")}</span>`;
+ document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} ${t("need you","cần bạn")}</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} ${t("running","đang chạy")}</span> <span class="mut">${ws.length?rows.length+"/"+d.rows.length:rows.length} ${t("sessions","phiên")}</span>`;
  const used=new Set();let h="";for(const [ti,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
  if(g.length)h+=`<h2>${ti} (${g.length})</h2>`+g.map(r=>card(r,now)).join("")}
- document.getElementById("m").innerHTML=h||`<div class="empty">${t("No sessions. Open a new Claude Code session to start tracking.","Không có phiên nào. Mở một phiên Claude Code mới để bắt đầu theo dõi.")}</div>`}catch(e){}}
+ document.getElementById("m").innerHTML=h||`<div class="empty">${ws.length
+  ?esc(t(`No sessions match "${Q.value.trim()}"`,`Không có phiên nào khớp "${Q.value.trim()}"`))+(all?"":"<br>"+t("Tick “show closed sessions” to search those too.","Bật “hiện phiên đã đóng” để tìm cả phiên đã đóng."))
+  :t("No sessions. Open a new Claude Code session to start tracking.","Không có phiên nào. Mở một phiên Claude Code mới để bắt đầu theo dõi.")}</div>`}
+// lưu từ khoá vào #q=... để reload/bookmark vẫn giữ; "/" để focus, Esc để xoá
+Q.oninput=()=>{history.replaceState(null,"",Q.value?"#q="+encodeURIComponent(Q.value):location.pathname);draw()};
+Q.onkeydown=e=>{if(e.key=="Escape"){Q.value="";Q.oninput();Q.blur()}};
+document.addEventListener("keydown",e=>{if(e.key=="/"&&document.activeElement!==Q&&!e.metaKey&&!e.ctrlKey){e.preventDefault();Q.focus();Q.select()}});
 document.getElementById("all").onchange=load;load();setInterval(load,2000);
 </script></body></html>"""
 
@@ -753,7 +791,7 @@ def main():
                 pass
         return
     if cmd in ("ls", "-a"):
-        sys.stdout.write(render("-a" in a))
+        sys.stdout.write(render("-a" in a, " ".join(x for x in a[1:] if x != "-a")))
     elif cmd == "watch":
         try:
             while True:
