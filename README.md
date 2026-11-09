@@ -18,6 +18,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Desktop app** "Claude Shepherd": its own window, a Dock badge and a menu bar icon; click a session to jump to its iTerm tab or VS Code window
 - **Plan quota** (5-hour / 7-day, same as `/usage`) in the app header, window title, menu bar, web dashboard and the Claude Code status line
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
+- **Remote Control sessions** started from your phone or claude.ai can be resumed in an iTerm tab with one click (see [below](#remote-control-sessions))
 - **`ccmon` CLI**
 
 - **English and Vietnamese** UI — more translations welcome
@@ -66,13 +67,27 @@ launchctl kickstart -k gui/$(id -u)/io.github.trantholock.ccmon
 
 `●` means unseen. A session is marked seen when you click **Open** / **Seen**, or when you send a new prompt.
 
+## Remote Control sessions
+
+When `claude remote-control` is running on your Mac, you can start a new session from the Claude mobile app or claude.ai/code. That session runs on the Mac in the background. ccmon recognises it from the `--sdk-url …/code/sessions/cse_…` argument and labels it **Remote**.
+
+Clicking a Remote session in the app, or **Terminal** on the dashboard, opens a new iTerm tab that runs `claude --resume <id>` in the session's folder:
+
+- **Idle or done:** the background worker is stopped first, then the same session is resumed. The conversation moves to the terminal, so you can no longer continue it from your phone.
+- **Running or waiting for permission:** the worker is left alone and the tab opens with `--fork-session`. You get a copy that has the full history, and the original keeps going.
+
+To open the session in the browser instead, use **Web** on the dashboard or right-click → Open on web in the app.
+
+To keep `claude remote-control` running all the time, start it from a LaunchAgent with `caffeinate -is` and send its stdout to `/dev/null`. Its screen output redraws constantly and would otherwise grow the log by tens of MB a day.
+
 ## CLI
 
 ```
 ccmon [ls] [-a]        status table (-a includes closed sessions)
 ccmon watch            table that refreshes every 2s
 ccmon serve [port]     web dashboard (default 7788)
-ccmon focus <id>       jump to the session's iTerm tab / VS Code window
+ccmon focus <id>       jump to the session's iTerm tab / VS Code window (Remote: resume in iTerm)
+ccmon term <id>        open the session in a new iTerm tab (claude --resume)
 ccmon ack [id|all]     mark as seen
 ccmon clean            delete closed sessions
 ccmon name <id> [name] set a session name (empty name = clear it)
@@ -120,12 +135,12 @@ scripts/uninstall.sh
 The server only listens on `127.0.0.1`.
 
 - `GET  /api/sessions?all=0|1` → `{now, rows: [...], usage}`
-- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/rename?id=&name=` (requires the `X-CCMon: 1` header)
+- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=` (requires the `X-CCMon: 1` header)
 
 ## Troubleshooting
 
 - Sessions opened before the hooks were installed only appear after their next prompt. In VS Code, run **Reload Window**.
-- The first time you focus an iTerm tab, macOS asks for Automation permission → Allow.
+- The first time you focus or open an iTerm tab, macOS asks for Automation permission → Allow.
 - Notifications may be listed under "Script Editor" in System Settings → Notifications.
 - Hook errors are logged to `~/.claude/ccmon/hook-errors.log`; the hook never breaks a Claude session.
 

@@ -17,6 +17,7 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **App desktop** "Claude Shepherd": cửa sổ riêng + badge trên Dock + biểu tượng trên menu bar, bấm vào phiên để nhảy tới đúng tab iTerm / cửa sổ VSCode
 - **Quota gói Claude** (5 giờ / 7 ngày, giống `/usage`) trên header app, tiêu đề cửa sổ, menu bar, dashboard web và statusLine của Claude Code
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
+- **Phiên Remote Control** mở từ điện thoại hoặc claude.ai: bấm một lần để resume trong tab iTerm (xem [bên dưới](#phiên-remote-control))
 - **CLI** `ccmon`
 
 ## Cài đặt
@@ -50,13 +51,27 @@ make uninstall   # gỡ hook, LaunchAgent, app (giữ dữ liệu ~/.claude/ccmo
 
 `●` = chưa xem. Phiên chuyển sang "đã xem" khi bấm **Mở**/**Đã xem**, hoặc khi bạn gửi prompt mới.
 
+## Phiên Remote Control
+
+Khi `claude remote-control` đang chạy trên Mac, bạn có thể tạo session mới từ app Claude trên điện thoại hoặc từ claude.ai/code. Session đó chạy ngầm trên Mac. ccmon nhận ra nó qua tham số `--sdk-url …/code/sessions/cse_…` và gắn nhãn **Remote**.
+
+Bấm vào session Remote trong app, hoặc nút **Terminal** trên dashboard, sẽ mở tab iTerm mới chạy `claude --resume <id>` trong thư mục của session:
+
+- **Đang rảnh hoặc đã xong:** dừng tiến trình chạy ngầm trước, rồi resume đúng session đó. Hội thoại chuyển hẳn sang terminal, nên trên điện thoại không gõ tiếp được nữa.
+- **Đang chạy hoặc đang chờ duyệt quyền:** không dừng tiến trình mà mở bằng `--fork-session`. Bạn có một bản sao đủ lịch sử, còn bản gốc vẫn tiếp tục chạy.
+
+Muốn mở trên trình duyệt thì dùng nút **Web** trên dashboard, hoặc chuột phải → Mở trên web trong app.
+
+Để `claude remote-control` luôn chạy, hãy khởi động nó bằng LaunchAgent với `caffeinate -is` và cho stdout vào `/dev/null`. Màn hình của nó vẽ lại liên tục, nếu ghi hết vào log thì log tăng hàng chục MB mỗi ngày.
+
 ## CLI
 
 ```
 ccmon [ls] [-a]       bảng trạng thái (-a gồm cả phiên đã đóng)
 ccmon watch           bảng tự làm mới 2s
 ccmon serve [port]    dashboard web (mặc định 7788)
-ccmon focus <id>      nhảy tới tab iTerm / cửa sổ VSCode của phiên
+ccmon focus <id>      nhảy tới tab iTerm / cửa sổ VSCode của phiên (Remote: resume trong iTerm)
+ccmon term <id>       mở phiên trong tab iTerm mới (claude --resume)
 ccmon ack [id|all]    đánh dấu đã xem
 ccmon clean           xóa phiên đã đóng
 ccmon name <id> [tên] đặt tên phiên (bỏ trống = xóa tên tự đặt)
@@ -102,12 +117,12 @@ scripts/uninstall.sh
 ## API (ccmon serve)
 
 - `GET  /api/sessions?all=0|1` → `{now, rows: [...]}`
-- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/rename?id=&name=` (bắt buộc header `X-CCMon: 1`)
+- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=` (bắt buộc header `X-CCMon: 1`)
 
 ## Ghi chú
 
 - Phiên mở trước khi cài hook chỉ xuất hiện sau prompt tiếp theo. VSCode cần Reload Window.
-- Lần đầu focus tới iTerm macOS sẽ hỏi quyền Automation → Allow.
+- Lần đầu focus hoặc mở tab iTerm, macOS sẽ hỏi quyền Automation → Allow.
 - Thông báo có thể nằm dưới tên "Script Editor" trong System Settings → Notifications.
 - Lỗi hook ghi vào `~/.claude/ccmon/hook-errors.log`; hook không bao giờ làm hỏng phiên Claude.
 

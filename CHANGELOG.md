@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - English UI (default) alongside Vietnamese, chosen from the macOS language or `ccmon lang en|vi|auto` / `CCMON_LANG`.
 - Demo GIF and screenshot in the README.
+- Sessions started from the Claude mobile app or claude.ai through `claude remote-control` are recognised and shown as **Remote**. Clicking one opens a new iTerm tab running `claude --resume <id>`. If the remote session is idle, its background worker is stopped first so the conversation moves to the terminal. If it is still running or waiting for permission, it is opened with `--fork-session` instead. The web page stays available from the **Web** button and the app's context menu.
+- `ccmon term <id>` and `POST /api/term?id=` open a session in a new iTerm tab with `claude --resume`. The dashboard shows a **Terminal** button on closed sessions, and the app adds **Resume in Terminal** to their context menu.
 
 ### Changed
 
