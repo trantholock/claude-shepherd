@@ -2,6 +2,13 @@
 # Gỡ: hook, LaunchAgent, app, symlink (giữ lại dữ liệu ~/.claude/ccmon)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$(uname -s)" = "Linux" ]; then
+  BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+  python3 "$ROOT/ccmon/ccmon" teardown
+  [ -L "$BIN/ccmon" ] && rm "$BIN/ccmon"
+  exit 0
+fi
 /usr/bin/python3 "$ROOT/scripts/hooks.py" uninstall
 for l in io.github.trantholock.ccmon io.github.trantholock.claude-shepherd io.github.trantholock.claude-agents com.trantho.ccmon com.trantho.claude-agents; do
   launchctl bootout "gui/$(id -u)/$l" 2>/dev/null

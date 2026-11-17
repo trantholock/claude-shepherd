@@ -5,8 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-17
+
 ### Added
 
+- **Linux and Windows support** for the `ccmon` CLI, hooks, desktop notifications and web dashboard (the desktop app stays macOS-only).
+  - Linux: `.deb` (Debian/Ubuntu), `.rpm` (Fedora/RHEL/Rocky/openSUSE), `.pkg.tar.zst` (Arch) and a generic `tar.gz` with `install.sh`. The dashboard runs as a `systemd --user` service; notifications use `notify-send`; `ccmon term` opens `x-terminal-emulator`, GNOME Terminal, Konsole, kitty, Alacritty, WezTerm… or `$CCMON_TERMINAL`.
+  - Windows 10/11: zip with `install.ps1` / `uninstall.ps1` (no admin). The dashboard starts at login from `HKCU\…\Run`; notifications are Windows toasts; `ccmon term` opens a Windows Terminal tab (or a new console).
+  - `ccmon setup` / `ccmon teardown [--no-service]` add or remove the hooks and the login service on Linux/Windows. `ccmon version`.
+- Release workflow: pushing a `vX.Y.Z` tag runs CI on macOS, Linux and Windows, builds the packages, installs them on Ubuntu 22.04/24.04, Debian 12, Fedora 41, Rocky 9, openSUSE Tumbleweed and Arch, then publishes a GitHub Release with `SHA256SUMS`.
+- Cross-platform smoke test (`tests/smoke.py`), run by `make check` and CI.
 - English UI (default) alongside Vietnamese, chosen from the macOS language or `ccmon lang en|vi|auto` / `CCMON_LANG`.
 - Demo GIF and screenshot in the README.
 - Sessions started from the Claude mobile app or claude.ai through `claude remote-control` are recognised and shown as **Remote**. Clicking one opens a new iTerm tab running `claude --resume <id>`. If the remote session is idle, its background worker is stopped first so the conversation moves to the terminal. If it is still running or waiting for permission, it is opened with `--fork-session` instead. The web page stays available from the **Web** button and the app's context menu.
@@ -15,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `ccmon` reads hook input and writes its files as UTF-8 on every OS (Windows defaults to the console code page).
+- The hook/statusLine editing logic moved from `scripts/hooks.py` into `ccmon` so all platforms share it; `scripts/hooks.py` is now a thin wrapper.
+- Shebang is now `#!/usr/bin/env python3`. The macOS hooks and LaunchAgent still call `/usr/bin/python3` explicitly.
 - Project renamed to **Claude Shepherd** (repo `claude-shepherd`, app "Claude Shepherd.app", bundle ID `io.github.trantholock.claude-shepherd`). `make install` removes the old "Claude Agents" app and LaunchAgent. The CLI is still `ccmon`.
 
 ## [1.0.0] - 2026-10-23
@@ -32,5 +43,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - LaunchAgent labels and bundle ID renamed from `com.trantho.*` to `io.github.trantholock.*`; `make install` removes the old ones.
 
-[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/trantholock/claude-shepherd/releases/tag/v1.0.0

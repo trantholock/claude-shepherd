@@ -1,29 +1,40 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """ccmon — track every Claude Code session (terminal + VS Code).
 
   ccmon hook            # called by Claude Code hooks (reads JSON from stdin)
   ccmon [ls] [-a] [text] # status table (-a: include closed sessions; text: search)
   ccmon watch           # table that refreshes every 2s
   ccmon serve [port]    # web dashboard http://127.0.0.1:7788
-  ccmon focus <id>      # jump to the session's iTerm tab / VS Code window (Remote Control: claude.ai/code)
-  ccmon term <id>       # open the session in a new iTerm tab (claude --resume; --fork-session if still live)
+  ccmon focus <id>      # jump to the session's terminal tab (iTerm) / VS Code window
+  ccmon term <id>       # open the session in a new terminal tab (claude --resume; --fork-session if still live)
   ccmon ack <id|all>    # mark as seen
   ccmon clean           # delete closed sessions
   ccmon name <id> [name] # give a session a memorable name (empty = clear)
   ccmon usage           # Claude plan quota, 5h / 7d
-  ccmon lang [en|vi|auto]  # UI language (default: follows macOS)
+  ccmon lang [en|vi|auto]  # UI language (default: follows the OS)
   ccmon statusline      # called by Claude Code statusLine: stores quota + session name
+  ccmon setup [--no-service]     # Linux/Windows: add hooks + start the dashboard at login
+  ccmon teardown [--no-service]  # Linux/Windows: remove hooks + the login service (keeps data)
+  ccmon version
 """
 import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import time
 import unicodedata
 from urllib.parse import unquote
+
+VERSION = "1.1.0"
+IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+# Windows: không bật cửa sổ console cho tiến trình con (notify, PowerShell)
+NO_WINDOW = 0x08000000 if IS_WIN else 0
 
 BASE = os.path.expanduser("~/.claude/ccmon")
 STATE = os.path.join(BASE, "sessions")
@@ -44,7 +55,7 @@ def _path(sid):
 
 def load(sid):
     try:
-        with open(_path(sid)) as f:
+        with open(_path(sid), encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -53,25 +64,41 @@ def load(sid):
 def save(s):
     os.makedirs(STATE, exist_ok=True)
     tmp = _path(s["session_id"]) + ".%d.tmp" % os.getpid()
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f, ensure_ascii=False)
-    os.replace(tmp, _path(s["session_id"]))
+    _replace(tmp, _path(s["session_id"]))
+
+
+def _replace(tmp, dst):
+    # Windows: os.replace lỗi PermissionError khi tiến trình khác (dashboard) đang mở dst -> thử lại
+    for i in range(20):
+        try:
+            return os.replace(tmp, dst)
+        except PermissionError:
+            if not IS_WIN or i == 19:
+                raise
+            time.sleep(0.025)
 
 
 def read_json(path, default=None):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return default
 
 
+def read_stdin_json():
+    # Claude Code gửi UTF-8; trên Windows sys.stdin mặc định theo code page (cp1252...) -> đọc bytes
+    return json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
+
+
 def write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 # ---------- ngôn ngữ ----------
@@ -81,19 +108,30 @@ _VI = None
 
 
 def is_vi():
-    """CCMON_LANG > config.json > ngôn ngữ chính của macOS; mặc định tiếng Anh."""
+    """CCMON_LANG > config.json > ngôn ngữ của hệ điều hành; mặc định tiếng Anh."""
     global _VI
     if _VI is None:
-        lang = os.environ.get("CCMON_LANG") or read_json(CONFIG, {}).get("lang") or ""
-        if not lang:
-            try:
-                out = subprocess.check_output(["defaults", "read", "-g", "AppleLanguages"],
-                                              text=True, stderr=subprocess.DEVNULL)
-                lang = out.strip("()\n ").split(",")[0].strip().strip('"')
-            except Exception:
-                pass
+        lang = os.environ.get("CCMON_LANG") or read_json(CONFIG, {}).get("lang") or os_lang()
         _VI = lang.lower().startswith("vi")
     return _VI
+
+
+def os_lang():
+    try:
+        if IS_MAC:
+            out = subprocess.check_output(["defaults", "read", "-g", "AppleLanguages"],
+                                          text=True, stderr=subprocess.DEVNULL)
+            return out.strip("()\n ").split(",")[0].strip().strip('"')
+        if IS_WIN:
+            import ctypes
+            # primary language id của UI; 0x2a = LANG_VIETNAMESE
+            return "vi" if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x2A else "en"
+    except Exception:
+        return ""
+    for k in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        if os.environ.get(k):
+            return os.environ[k]
+    return ""
 
 
 def T(en, vi):
@@ -128,7 +166,7 @@ def title_of(s, names=None, sl=None):
     if sl is None:
         sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
     return (names.get(s["session_id"]) or sl.get("session_name")
-            or os.path.basename((s.get("cwd") or "").rstrip("/")) or "?")
+            or os.path.basename((s.get("cwd") or "").rstrip("/\\")) or "?")
 
 
 def all_sessions():
@@ -150,21 +188,121 @@ def find(prefix):
 
 # ---------- hook ----------
 
+# ---------- tiến trình (macOS: ps, Linux: /proc, Windows: Toolhelp32 qua ctypes) ----------
+
+def _linux_proc(pid):
+    """(ppid, tên) của pid. Tên = argv[0] + đường dẫn exe, vì bản claude native trên Linux
+    có comm là số version (vd "2.1.3") chứ không phải "claude"."""
+    with open("/proc/%d/stat" % pid, "rb") as f:
+        st = f.read().decode("utf-8", "replace")
+    ppid = int(st[st.rfind(")") + 2:].split()[1])
+    name = st[st.find("(") + 1:st.rfind(")")]
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            argv0 = f.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+        name = "%s %s" % (argv0 or name, os.readlink("/proc/%d/exe" % pid))
+    except OSError:
+        pass
+    return ppid, name
+
+
+def _win_procs():
+    """{pid: (ppid, exe)} cho mọi tiến trình — stdlib, không gọi PowerShell (hook phải nhanh)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k.Process32FirstW.argtypes = k.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PE)]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    snap = k.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return {}
+    out = {}
+    e = PE()
+    e.dwSize = ctypes.sizeof(PE)
+    try:
+        ok = k.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            out[e.th32ProcessID] = (e.th32ParentProcessID, e.szExeFile)
+            ok = k.Process32NextW(snap, ctypes.byref(e))
+    finally:
+        k.CloseHandle(snap)
+    return out
+
+
+def proc_parent(pid, _win=None):
+    """(ppid, tên tiến trình) hoặc None."""
+    try:
+        if IS_LINUX:
+            return _linux_proc(pid)
+        if IS_WIN:
+            return (_win if _win is not None else _win_procs()).get(pid)
+        out = subprocess.check_output(["ps", "-o", "ppid=,comm=", "-p", str(pid)], text=True).strip()
+        ppid, comm = out.split(None, 1)
+        return int(ppid), comm
+    except Exception:
+        return None
+
+
+def is_claude_proc(name, vscode=False):
+    n = (name or "").lower()
+    base = re.split(r"[/\\]", n.split(" ", 1)[0])[-1]
+    if "claude" in n or base in ("node", "node.exe") or n.endswith("/node"):
+        return True
+    # extension VS Code chạy claude bên trong tiến trình helper của Code
+    return vscode and ("code helper" in n or base == "code.exe")
+
+
 def claude_pid():
     p = os.environ.get("CLAUDE_PID")
     if p and p.isdigit():
         return int(p)
     pid = os.getppid()
+    win = _win_procs() if IS_WIN else None
     for _ in range(5):
-        try:
-            out = subprocess.check_output(["ps", "-o", "ppid=,comm=", "-p", str(pid)], text=True).strip()
-        except Exception:
+        info = proc_parent(pid, win)
+        if not info:
             return None
-        ppid, comm = out.split(None, 1)
-        if "claude" in comm.lower() or comm.endswith("node"):
+        ppid, comm = info
+        if is_claude_proc(comm):
             return pid
-        pid = int(ppid)
+        pid = ppid
     return None
+
+
+def proc_args(pid):
+    try:
+        if IS_LINUX:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        if IS_WIN:
+            # chỉ gọi cho phiên headless (hiếm) nên chấp nhận chi phí khởi động PowerShell
+            return subprocess.check_output(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "(Get-CimInstance Win32_Process -Filter 'ProcessId=%d').CommandLine" % int(pid)],
+                text=True, stderr=subprocess.DEVNULL, timeout=4, creationflags=NO_WINDOW)
+        return subprocess.check_output(["ps", "-o", "args=", "-p", str(pid)], text=True)
+    except Exception:
+        return ""
+
+
+def pid_alive(pid):
+    if IS_WIN:  # os.kill(pid, 0) trên Windows = gửi CTRL_C_EVENT, không phải kiểm tra
+        return pid in _win_procs()
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def remote_url_of_pid(pid):
@@ -172,10 +310,7 @@ def remote_url_of_pid(pid):
     --sdk-url .../code/sessions/cse_XXX -> trang web https://claude.ai/code/session_XXX."""
     if not pid:
         return ""
-    try:
-        args = subprocess.check_output(["ps", "-o", "args=", "-p", str(pid)], text=True)
-    except Exception:
-        return ""
+    args = proc_args(pid)
     m = re.search(r"/code/sessions/cse_([A-Za-z0-9]+)", args)
     return "https://claude.ai/code/session_" + m.group(1) if m else ""
 
@@ -234,9 +369,38 @@ def was_interrupted(transcript):
 def notify(title, msg):
     if not NOTIFY:
         return
-    q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')[:220]
-    script = 'display notification "%s" with title "%s" sound name "Glass"' % (q(msg), q(title))
-    subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    title, msg = title[:120], msg[:220]
+    env = None
+    try:
+        if IS_MAC:
+            q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
+            script = 'display notification "%s" with title "%s" sound name "Glass"' % (q(msg), q(title))
+            cmd = ["osascript", "-e", script]
+        elif IS_WIN:
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                   "-Command", WIN_TOAST]
+            env = dict(os.environ, CCMON_TOAST_TITLE=title, CCMON_TOAST_MSG=msg)
+        elif shutil.which("notify-send"):
+            cmd = ["notify-send", "-a", "Claude Shepherd", title, msg]
+        else:
+            return
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, env=env, creationflags=NO_WINDOW)
+    except Exception:
+        pass
+
+
+# Toast Windows 10/11 qua WinRT, có sẵn trong Windows PowerShell 5.1; title/msg truyền qua biến môi trường
+# (-Command ghép mọi tham số thừa vào script -> không truyền nội dung qua argv để tránh injection). AppId của PowerShell để toast hiện mà không cần đăng ký app.
+WIN_TOAST = r"""
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$t = $x.GetElementsByTagName('text')
+$null = $t.Item(0).AppendChild($x.CreateTextNode($env:CCMON_TOAST_TITLE))
+$null = $t.Item(1).AppendChild($x.CreateTextNode($env:CCMON_TOAST_MSG))
+$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))
+"""
 
 
 def tool_brief(name, inp):
@@ -248,7 +412,7 @@ def tool_brief(name, inp):
 
 
 def hook():
-    data = json.load(sys.stdin)
+    data = read_stdin_json()
     sid = data.get("session_id")
     if not sid:
         return
@@ -325,7 +489,7 @@ def usage():
 
 
 def statusline():
-    data = json.load(sys.stdin)
+    data = read_stdin_json()
     sid = data.get("session_id", "")
     now = time.time()
     rl = data.get("rate_limits")
@@ -377,6 +541,20 @@ def render_usage():
 # ---------- hiển thị ----------
 
 def ps_table():
+    """{pid: tên tiến trình} của mọi tiến trình."""
+    if IS_WIN:
+        try:
+            return {pid: exe for pid, (_, exe) in _win_procs().items()}
+        except Exception:
+            return {}
+    if IS_LINUX:
+        t = {}
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                info = proc_parent(int(d))
+                if info:
+                    t[int(d)] = info[1]
+        return t
     try:
         out = subprocess.check_output(["ps", "-axo", "pid=,comm="], text=True)
     except Exception:
@@ -395,7 +573,7 @@ def effective(s, procs):
         return st
     pid = s.get("pid")
     comm = procs.get(pid, "") if pid else ""
-    if pid and not ("claude" in comm.lower() or comm.endswith("node") or "Code Helper" in comm):
+    if pid and not is_claude_proc(comm, vscode=True):
         return "closed"
     if st == "running" and time.time() - s.get("updated", 0) > 30 and was_interrupted(s.get("transcript", "")):
         return "interrupted"
@@ -423,7 +601,7 @@ def snapshot(include_closed=False):
                 s["app"] = "Remote"
         sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
         s["state"] = st
-        s["project"] = os.path.basename((s.get("cwd") or "").rstrip("/"))
+        s["project"] = os.path.basename((s.get("cwd") or "").rstrip("/\\"))
         s["name"] = names.get(s["session_id"], "")
         s["auto_name"] = sl.get("session_name", "")
         s["title"] = title_of(s, names, sl)
@@ -519,20 +697,46 @@ def forget(sid):
         pass
 
 
+def vscode_storage():
+    if IS_MAC:
+        root = os.path.expanduser("~/Library/Application Support")
+    elif IS_WIN:
+        root = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
+    else:
+        root = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(root, "Code", "User", "globalStorage", "storage.json")
+
+
+def _norm(p):
+    # so sánh đường dẫn: Windows không phân biệt hoa thường và dùng cả \ lẫn /
+    return os.path.normcase(p.replace("\\", "/").rstrip("/")) if IS_WIN else p.rstrip("/")
+
+
 def vscode_folder(cwd):
     """Thư mục đang mở trong VSCode chứa cwd (sâu nhất), để focus đúng cửa sổ thay vì mở cửa sổ mới."""
-    st = read_json(os.path.expanduser("~/Library/Application Support/Code/User/globalStorage/storage.json"), {})
+    st = read_json(vscode_storage(), {})
     ws = st.get("windowsState") or {}
     wins = list(ws.get("openedWindows") or []) + [ws.get("lastActiveWindow") or {}]
     best = ""
+    c = _norm(cwd)
     for w in wins:
         f = w.get("folder") or ""
         if not f.startswith("file://"):
             continue
         f = unquote(f[7:]).rstrip("/")
-        if (cwd == f or cwd.startswith(f + "/")) and len(f) > len(best):
+        if IS_WIN and re.match(r"^/[A-Za-z]:", f):  # file:///c%3A/Users/... -> c:/Users/...
+            f = f[1:]
+        nf = _norm(f)
+        sep = "\\" if IS_WIN else "/"
+        if (c == nf or c.startswith(nf + sep)) and len(f) > len(best):
             best = f
     return best or cwd
+
+
+def vscode_cli():
+    if IS_MAC and os.path.exists("/usr/local/bin/code"):
+        return "/usr/local/bin/code"
+    return shutil.which("code") or "code"  # Windows: code.cmd
 
 
 def focus(s):
@@ -541,10 +745,12 @@ def focus(s):
     if s.get("remote") or (s.get("app") == "headless" and remote_url_of_pid(s.get("pid"))):
         return term(s)  # phiên mở từ mobile: không có tab nào để focus -> resume trong iTerm
     if s.get("app", "").startswith("VSCode") and s.get("cwd"):
-        code = "/usr/local/bin/code" if os.path.exists("/usr/local/bin/code") else "code"
-        subprocess.run([code, vscode_folder(s["cwd"])])
+        try:
+            subprocess.run([vscode_cli(), vscode_folder(s["cwd"])], creationflags=NO_WINDOW)
+        except OSError as e:
+            return str(e)
         return "ok"
-    if s.get("iterm"):
+    if s.get("iterm") and IS_MAC:
         script = '''
 tell application "iTerm2"
   repeat with w in windows
@@ -564,7 +770,10 @@ end tell
 return "notfound"''' % s["iterm"]
         r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
         return r.stdout.strip() or r.stderr.strip()
-    return T("don't know how to focus app %s", "không biết cách focus app %s") % s.get("app")
+    if not IS_MAC and s.get("state", s.get("status")) == "closed":
+        return term(s)
+    return T("don't know how to focus app %s (use `ccmon term`)",
+             "không biết cách focus app %s (dùng `ccmon term`)") % s.get("app")
 
 
 ITERM_NEW_TAB = '''
@@ -598,22 +807,252 @@ def term(s):
             pid = s["pid"]
             try:
                 os.kill(pid, signal.SIGTERM)
-                for _ in range(30):
-                    time.sleep(0.1)
-                    os.kill(pid, 0)
             except OSError:
-                pass  # đã thoát
+                pass
+            for _ in range(30):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.1)
             else:
                 fork = True  # không dừng được -> fork cho an toàn
         else:
             fork = True
-    cmd = "cd %s && claude --resume %s%s" % (shlex.quote(s.get("cwd") or os.path.expanduser("~")),
-                                            s["session_id"], " --fork-session" if fork else "")
-    # chạy lệnh trực tiếp khi tạo tab (không "write text" vì gõ phím lúc zsh chưa sẵn sàng bị lẫn ký tự),
-    # xong thì thả về zsh để tab không tự đóng
-    shell = "/bin/zsh -lic %s" % shlex.quote(cmd + "; exec /bin/zsh -l")
-    r = subprocess.run(["osascript", "-e", ITERM_NEW_TAB, shell], capture_output=True, text=True)
-    return r.stdout.strip() or r.stderr.strip()
+    sid = s["session_id"]
+    if not re.match(r"^[A-Za-z0-9_-]+$", sid):  # sid đi vào lệnh shell
+        return "invalid session id"
+    cwd = s.get("cwd") or os.path.expanduser("~")
+    if not os.path.isdir(cwd):
+        cwd = os.path.expanduser("~")
+    args = ["claude", "--resume", sid] + (["--fork-session"] if fork else [])
+    try:
+        return open_terminal(cwd, args)
+    except Exception as e:
+        return str(e)
+
+
+def open_terminal(cwd, args):
+    """Chạy `args` trong cwd ở một tab/cửa sổ terminal mới; khi lệnh kết thúc thì giữ shell mở."""
+    if IS_MAC:
+        cmd = "cd %s && %s" % (shlex.quote(cwd), " ".join(shlex.quote(a) for a in args))
+        # chạy lệnh trực tiếp khi tạo tab (không "write text" vì gõ phím lúc zsh chưa sẵn sàng bị lẫn ký tự),
+        # xong thì thả về zsh để tab không tự đóng
+        shell = "/bin/zsh -lic %s" % shlex.quote(cmd + "; exec /bin/zsh -l")
+        r = subprocess.run(["osascript", "-e", ITERM_NEW_TAB, shell], capture_output=True, text=True)
+        return r.stdout.strip() or r.stderr.strip()
+    if IS_WIN:
+        claude = shutil.which("claude") or "claude"
+        wt = shutil.which("wt")
+        if wt:  # Windows Terminal: tab mới; cmd /k giữ cửa sổ sau khi claude thoát
+            subprocess.Popen([wt, "-w", "0", "new-tab", "-d", cwd, "cmd", "/k", claude] + args[1:])
+        else:
+            subprocess.Popen(["cmd", "/k", claude] + args[1:], cwd=cwd,
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return "ok"
+    # Linux: $CCMON_TERMINAL (vd "kitty -e") > terminal phổ biến đầu tiên tìm thấy
+    sh = os.environ.get("SHELL") or "/bin/bash"
+    inner = [sh, "-lic", "%s; exec %s -l" % (" ".join(shlex.quote(a) for a in args), shlex.quote(sh))]
+    custom = os.environ.get("CCMON_TERMINAL")
+    if custom:
+        launch = shlex.split(custom) + inner
+    else:
+        for name, pre in LINUX_TERMINALS:
+            if shutil.which(name):
+                launch = [name] + pre + inner
+                break
+        else:
+            return T("no terminal emulator found; set CCMON_TERMINAL (e.g. \"kitty -e\")",
+                     "không tìm thấy terminal; đặt CCMON_TERMINAL (vd \"kitty -e\")")
+    subprocess.Popen(launch, cwd=cwd, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "ok"
+
+
+# (tên lệnh, tham số trước lệnh cần chạy)
+LINUX_TERMINALS = [
+    ("x-terminal-emulator", ["-e"]),   # Debian/Ubuntu alternatives
+    ("gnome-terminal", ["--"]),
+    ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-x"]),
+    ("kitty", []),
+    ("alacritty", ["-e"]),
+    ("wezterm", ["start", "--"]),
+    ("foot", []),
+    ("tilix", ["-e"]),
+    ("xterm", ["-e"]),
+]
+
+
+# ---------- cài đặt (hook + dịch vụ chạy nền) ----------
+
+SETTINGS = os.path.expanduser("~/.claude/settings.json")
+HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"]
+_OURS = re.compile(r"""ccmon['"]? hook""")
+
+
+def settings_hooks(action, cmd=""):
+    """Thêm/gỡ hook + statusLine của ccmon trong ~/.claude/settings.json (idempotent, có backup).
+    cmd: lệnh hook, kết thúc bằng " hook"; statusLine dùng cùng lệnh với " statusline"."""
+    s = read_json(SETTINGS, None)
+    if s is None and os.path.exists(SETTINGS):
+        raise SystemExit("%s is not valid JSON; fix it first" % SETTINGS)
+    s = s or {}
+    if os.path.exists(SETTINGS):
+        shutil.copy(SETTINGS, SETTINGS + ".bak-ccmon-" + time.strftime("%Y%m%d%H%M%S"))
+    is_ours = lambda e: any(_OURS.search(h.get("command", "")) for h in e.get("hooks", []))
+    hooks = s.setdefault("hooks", {})
+    for ev in HOOK_EVENTS:
+        lst = [e for e in hooks.get(ev, []) if not is_ours(e)]
+        if action == "install":
+            e = {"hooks": [{"type": "command", "command": cmd, "timeout": 5}]}
+            if ev in ("PreToolUse", "PostToolUse"):
+                e["matcher"] = "*"
+            lst.append(e)
+        if lst:
+            hooks[ev] = lst
+        else:
+            hooks.pop(ev, None)
+    if not hooks:
+        s.pop("hooks")
+    # statusLine: chỉ chiếm chỗ khi chưa có statusLine riêng của người dùng
+    sl = s.get("statusLine") or {}
+    ours = "ccmon" in sl.get("command", "")
+    if action == "install" and (not sl or ours):
+        s["statusLine"] = {"type": "command", "command": cmd[:-len(" hook")] + " statusline"}
+    elif action == "install":
+        print(T("keeping your statusLine (%s): quota will not be updated",
+                "giữ statusLine hiện có (%s) — quota sẽ không được cập nhật") % sl.get("command"))
+    elif ours:
+        s.pop("statusLine")
+    write_json(SETTINGS, s)
+    print("hooks %s: %s" % (action, ", ".join(HOOK_EVENTS)))
+
+
+def _py(gui=False):
+    py = sys.executable or "python3"
+    if IS_WIN and gui:  # pythonw: không có cửa sổ console cho tiến trình chạy nền
+        w = os.path.join(os.path.dirname(py), "pythonw.exe")
+        return w if os.path.exists(w) else py
+    return py
+
+
+def _self():
+    # không realpath: giữ đường dẫn symlink (~/.local/bin/ccmon, /usr/bin/ccmon) cho ổn định khi nâng cấp
+    return os.path.abspath(sys.argv[0] if os.path.basename(sys.argv[0]).startswith("ccmon") else __file__)
+
+
+def hook_command():
+    if IS_WIN:  # dấu " + / chạy được cả trong Git Bash lẫn cmd.exe
+        q = lambda p: '"%s"' % p.replace("\\", "/")
+    else:
+        q = shlex.quote
+    return "%s %s hook" % (q(_py()), q(_self()))
+
+
+SYSTEMD_UNIT = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                            "systemd", "user", "claude-shepherd.service")
+WIN_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+WIN_RUN_NAME = "ClaudeShepherd"
+PIDFILE = os.path.join(BASE, "serve.pid")
+
+
+def _systemctl(*a):
+    try:
+        return subprocess.run(["systemctl", "--user"] + list(a), capture_output=True, text=True).returncode == 0
+    except OSError:
+        return False
+
+
+def _stop_pidfile():
+    try:
+        pid = int(open(PIDFILE).read().strip())
+    except (OSError, ValueError):
+        return
+    if pid_alive(pid) and is_python_proc(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    try:
+        os.remove(PIDFILE)
+    except OSError:
+        pass
+
+
+def is_python_proc(pid):
+    n = (ps_table().get(pid) or "").lower()
+    return "python" in n or "ccmon" in n
+
+
+def service(action):
+    """Linux: systemd --user unit. Windows: khoá Run trong HKCU (không cần quyền admin)."""
+    os.makedirs(BASE, exist_ok=True)
+    if IS_WIN:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WIN_RUN_KEY) as k:
+            if action == "install":
+                winreg.SetValueEx(k, WIN_RUN_NAME, 0, winreg.REG_SZ,
+                                  '"%s" "%s" serve' % (_py(gui=True), _self()))
+            else:
+                try:
+                    winreg.DeleteValue(k, WIN_RUN_NAME)
+                except OSError:
+                    pass
+        _stop_pidfile()
+        if action == "install":
+            subprocess.Popen([_py(gui=True), _self(), "serve"], close_fds=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=0x00000008 | 0x00000200 | NO_WINDOW)  # DETACHED | NEW_PROCESS_GROUP
+        print("login item %s: HKCU\\%s\\%s" % (action, WIN_RUN_KEY, WIN_RUN_NAME))
+        return
+    if action == "install":
+        os.makedirs(os.path.dirname(SYSTEMD_UNIT), exist_ok=True)
+        with open(SYSTEMD_UNIT, "w", encoding="utf-8") as f:
+            f.write(SYSTEMD_TMPL % {"py": _py(), "ccmon": _self(), "version": VERSION})
+        if _systemctl("daemon-reload") and _systemctl("enable", "--now", "claude-shepherd.service") \
+                and _systemctl("restart", "claude-shepherd.service"):
+            print("systemd --user: claude-shepherd.service enabled")
+        else:
+            print(T("systemd --user is not available (WSL/container?). Start the dashboard yourself: ccmon serve &",
+                    "không dùng được systemd --user (WSL/container?). Tự chạy dashboard: ccmon serve &"))
+    else:
+        _systemctl("disable", "--now", "claude-shepherd.service")
+        try:
+            os.remove(SYSTEMD_UNIT)
+        except OSError:
+            pass
+        _systemctl("daemon-reload")
+        _stop_pidfile()
+        print("systemd --user: claude-shepherd.service removed")
+
+
+SYSTEMD_TMPL = """[Unit]
+Description=Claude Shepherd dashboard (ccmon serve %(version)s)
+Documentation=https://github.com/trantholock/claude-shepherd
+
+[Service]
+ExecStart="%(py)s" "%(ccmon)s" serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def setup(action, with_service=True):
+    if IS_MAC:
+        raise SystemExit(T("On macOS use `make install` / `make uninstall` (also builds the app).",
+                           "Trên macOS dùng `make install` / `make uninstall` (kèm build app)."))
+    os.makedirs(BASE, exist_ok=True)
+    settings_hooks(action, hook_command())
+    if with_service:
+        service(action)
+    if action == "install":
+        print(T("Done. Dashboard: http://127.0.0.1:7788 — sessions started from now on are tracked.",
+                "Xong. Dashboard: http://127.0.0.1:7788 — các phiên mở từ giờ sẽ được theo dõi."))
+    else:
+        print(T("Removed. Session data is kept in %s (delete it by hand if you want).",
+                "Đã gỡ. Dữ liệu phiên vẫn ở %s (xoá tay nếu muốn).") % BASE)
 
 
 # ---------- web ----------
@@ -668,7 +1107,12 @@ def serve(port):
             self._send(200, json.dumps({"result": res}))
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    print("ccmon dashboard: http://127.0.0.1:%d" % port, flush=True)
+    os.makedirs(BASE, exist_ok=True)
+    if sys.stderr is None:  # pythonw (Windows) không có stderr
+        sys.stderr = open(os.path.join(BASE, "serve.log"), "a", encoding="utf-8")
+    write_json(PIDFILE, os.getpid())
+    if sys.stdout:
+        print("ccmon dashboard: http://127.0.0.1:%d" % port, flush=True)
     srv.serve_forever()
 
 
@@ -749,7 +1193,7 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
  <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${t(ago(r.updated,now)+" ago",ago(r.updated,now)+" trước")}${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
  <span class="acts"><button onclick="act('focus','${r.session_id}')">${r.remote?"Terminal":t("Open","Mở")}</button>
  ${r.remote?`<button onclick="window.open('${r.remote}')">Web</button>`:""}
- ${r.state=="closed"?`<button onclick="act('term','${r.session_id}')" title="${t("claude --resume in a new iTerm tab","claude --resume trong tab iTerm mới")}">Terminal</button>`:""}
+ ${r.state=="closed"?`<button onclick="act('term','${r.session_id}')" title="${t("claude --resume in a new terminal tab","claude --resume trong tab terminal mới")}">Terminal</button>`:""}
  ${nw?`<button onclick="act('ack','${r.session_id}')">${t("Seen","Đã xem")}</button>`:""}
  ${r.state=="closed"?`<button onclick="act('forget','${r.session_id}')">${t("Remove","Xóa")}</button>`:""}</span></div>
  ${r.last_prompt?`<div class="body q">» ${esc(r.last_prompt)}</div>`:""}
@@ -779,13 +1223,20 @@ document.getElementById("all").onchange=load;load();setInterval(load,2000);
 def main():
     a = sys.argv[1:]
     cmd = a[0] if a else "ls"
+    if IS_WIN:
+        # stdout bị pipe (statusLine) dùng code page -> emoji/tiếng Việt lỗi; ép UTF-8
+        for st in (sys.stdout, sys.stderr):
+            if st and hasattr(st, "reconfigure"):
+                st.reconfigure(encoding="utf-8", errors="replace")
+        if cmd in ("ls", "-a", "watch") and sys.stdout and sys.stdout.isatty():
+            os.system("")  # bật xử lý mã màu ANSI trên console cũ (conhost)
     if cmd == "hook":
         try:
             hook()
         except Exception as e:  # không bao giờ làm hỏng phiên Claude
             try:
                 os.makedirs(STATE, exist_ok=True)
-                with open(os.path.join(STATE, "..", "hook-errors.log"), "a") as f:
+                with open(os.path.join(BASE, "hook-errors.log"), "a", encoding="utf-8") as f:
                     f.write("%s %r\n" % (time.strftime("%F %T"), e))
             except Exception:
                 pass
@@ -835,6 +1286,10 @@ def main():
             global _VI
             _VI = None
         print("lang: %s" % ("vi" if is_vi() else "en"))
+    elif cmd in ("setup", "teardown"):
+        setup("install" if cmd == "setup" else "uninstall", "--no-service" not in a)
+    elif cmd in ("version", "--version", "-V"):
+        print("ccmon %s" % VERSION)
     elif cmd == "clean":
         procs = ps_table()
         for s in all_sessions():

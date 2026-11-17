@@ -4,12 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -17,3 +18,47 @@ jobs:
         run: brew install shellcheck
       - name: Lint and build
         run: make check
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: shellcheck
+        run: shellcheck scripts/*.sh packaging/*.sh
+      - name: Smoke test
+        run: python tests/smoke.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke test
+        run: python tests/smoke.py
+      - name: install.ps1 / uninstall.ps1
+        shell: pwsh
+        run: |
+          $env:CCMON_NOTIFY = '0'
+          ./scripts/install.ps1
+          $s = Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json
+          if (-not ($s.hooks.Stop.hooks.command -match 'ccmon" hook')) { throw 'hook not installed' }
+          & "$env:LOCALAPPDATA\Programs\claude-shepherd\ccmon.cmd" version
+          if ($LASTEXITCODE -ne 0) { throw 'ccmon.cmd failed' }
+          # dashboard được khởi chạy nền bởi setup
+          $ok = $false
+          foreach ($i in 1..30) {
+            try { Invoke-RestMethod http://127.0.0.1:7788/api/sessions | Out-Null; $ok = $true; break } catch { Start-Sleep 1 }
+          }
+          if (-not $ok) { throw 'dashboard not reachable' }
+          ./scripts/uninstall.ps1
+          $s = Get-Content "$HOME\.claude\settings.json" -Raw | ConvertFrom-Json
+          if ($s.hooks) { throw 'hooks not removed' }
+          if (Test-Path "$env:LOCALAPPDATA\Programs\claude-shepherd") { throw 'install dir not removed' }

@@ -2,6 +2,22 @@
 # Cài đặt: symlink ccmon, gắn hook Claude Code, LaunchAgent, build app
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ "$(uname -s)" = "Linux" ]; then
+  # Linux: không có app/LaunchAgent; ccmon setup gắn hook + systemd --user
+  BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+  PY="$(command -v python3 || true)"
+  [ -n "$PY" ] || { echo "python3 (3.9+) is required" >&2; exit 1; }
+  "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 9))' || { echo "python3 3.9+ is required" >&2; exit 1; }
+  echo "==> ccmon -> $BIN/ccmon"
+  mkdir -p "$BIN"
+  chmod +x "$ROOT/ccmon/ccmon"
+  [ -f "$BIN/ccmon" ] && [ ! -L "$BIN/ccmon" ] && mv "$BIN/ccmon" "$BIN/ccmon.bak-$(date +%Y%m%d%H%M%S)"
+  ln -sfn "$ROOT/ccmon/ccmon" "$BIN/ccmon"
+  "$PY" "$BIN/ccmon" setup
+  case ":$PATH:" in *":$BIN:"*) ;; *) echo "Add $BIN to your PATH to use the ccmon command." ;; esac
+  exit 0
+fi
 BIN="$HOME/bin/ccmon"
 LA="$HOME/Library/LaunchAgents"
 

@@ -1,0 +1,110 @@
+name: Release
+
+# Đẩy tag vX.Y.Z -> chạy CI đủ 3 OS -> đóng gói Linux/Windows -> kiểm tra cài gói trên các distro
+# -> tạo GitHub Release (nội dung lấy từ mục tương ứng trong CHANGELOG.md).
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+env:
+  NFPM_VERSION: 2.48.0
+  NFPM_SHA256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nfpm (pinned + checksum)
+        run: |
+          curl -fsSLo nfpm.tgz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "${NFPM_SHA256}  nfpm.tgz" | sha256sum -c -
+          tar -xzf nfpm.tgz nfpm && sudo install -m 0755 nfpm /usr/local/bin/nfpm && rm nfpm nfpm.tgz
+      - name: Build packages
+        run: scripts/dist.sh "${GITHUB_REF_NAME}"
+      - name: Test the Linux tarball (install.sh / uninstall.sh)
+        run: |
+          export CCMON_NOTIFY=0 HOME="$(mktemp -d)"
+          tar -xzf dist/*-linux.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP"/claude-shepherd-*-linux/install.sh
+          "$HOME/.local/bin/ccmon" version
+          grep -q 'ccmon hook' "$HOME/.claude/settings.json"
+          "$RUNNER_TEMP"/claude-shepherd-*-linux/uninstall.sh
+          ! grep -q 'ccmon hook' "$HOME/.claude/settings.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # cài thật gói trên các distro phổ biến, chạy ccmon setup --no-service + một vòng hook
+  verify-linux:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            install: apt-get update -qq && apt-get install -y -qq ./dist/*.deb
+          - image: ubuntu:24.04
+            install: apt-get update -qq && apt-get install -y -qq ./dist/*.deb
+          - image: debian:12
+            install: apt-get update -qq && apt-get install -y -qq ./dist/*.deb
+          - image: fedora:41
+            install: dnf install -y -q ./dist/*.rpm
+          - image: rockylinux:9
+            install: dnf install -y -q ./dist/*.rpm
+          - image: opensuse/tumbleweed:latest
+            install: zypper -n in --allow-unsigned-rpm ./dist/*.rpm
+          - image: archlinux:latest
+            install: pacman --disable-sandbox -Syu --noconfirm --needed python && pacman --disable-sandbox -U --noconfirm ./dist/*.pkg.tar.zst
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Install
+        run: ${{ matrix.install }}
+      - name: Use ccmon
+        shell: sh
+        run: |
+          set -e
+          export CCMON_NOTIFY=0
+          ccmon version
+          python3 "$(command -v ccmon)" setup --no-service
+          grep -q 'ccmon hook' ~/.claude/settings.json
+          echo '{"session_id":"11112222-aaaa","hook_event_name":"UserPromptSubmit","prompt":"xin chào","cwd":"/tmp"}' | ccmon hook
+          ccmon ls -a | grep -q 11112222
+          test ! -e ~/.claude/ccmon/hook-errors.log
+          ccmon teardown --no-service
+
+  release:
+    needs: verify-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
+          cat packaging/release-install.md >> notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
