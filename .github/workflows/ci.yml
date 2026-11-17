@@ -20,8 +20,10 @@ jobs:
         run: make check
 
   linux:
-    runs-on: ubuntu-latest
+    # ubuntu-latest (26.04) không còn bản dựng Python 3.9 cho setup-python -> ghim 24.04
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.9", "3.13"]
     steps:

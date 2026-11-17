@@ -19,6 +19,8 @@ ENV = dict(os.environ, HOME=HOME, USERPROFILE=HOME, APPDATA=os.path.join(HOME, "
            XDG_CONFIG_HOME=os.path.join(HOME, ".config"), CCMON_NOTIFY="0", CCMON_LANG="en",
            PYTHONDONTWRITEBYTECODE="1")
 SID = "0f1e2d3c-4b5a-6978-8a9b-acbdcedf0011"
+if hasattr(sys.stdout, "reconfigure"):  # console Windows (cp1252) không in được emoji/tiếng Việt
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def run(*args, stdin=None):
