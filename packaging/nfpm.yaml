@@ -1,0 +1,52 @@
+# nfpm: một cấu hình sinh .deb (Debian/Ubuntu), .rpm (Fedora/RHEL/openSUSE), .pkg.tar.zst (Arch)
+# VERSION lấy từ biến môi trường (scripts/dist.sh đặt từ tag git).
+name: claude-shepherd
+arch: all
+platform: linux
+version: ${VERSION}
+release: 1
+section: utils
+priority: optional
+maintainer: trantholock <trantholock@users.noreply.github.com>
+description: |
+  Herd your Claude Code agents: track every Claude Code session, get a
+  desktop notification when one finishes or waits for permission, and
+  see them all on a local web dashboard (http://127.0.0.1:7788).
+  After installing, run `ccmon setup` as your normal user.
+vendor: Claude Shepherd
+homepage: https://github.com/trantholock/claude-shepherd
+license: MIT
+
+depends:
+  - python3 (>= 3.9)
+recommends:
+  - libnotify-bin
+overrides:
+  rpm:
+    depends:
+      - python3 >= 3.9
+    recommends:
+      - libnotify
+  archlinux:
+    depends:
+      - python>=3.9
+    recommends:
+      - libnotify
+
+contents:
+  - src: ./ccmon/ccmon
+    dst: /usr/lib/claude-shepherd/ccmon
+    file_info:
+      mode: 0755
+  - src: /usr/lib/claude-shepherd/ccmon
+    dst: /usr/bin/ccmon
+    type: symlink
+  - src: ./README.md
+    dst: /usr/share/doc/claude-shepherd/README.md
+  - src: ./CHANGELOG.md
+    dst: /usr/share/doc/claude-shepherd/CHANGELOG.md
+  - src: ./LICENSE
+    dst: /usr/share/licenses/claude-shepherd/LICENSE
+
+scripts:
+  postinstall: ./packaging/postinstall.sh

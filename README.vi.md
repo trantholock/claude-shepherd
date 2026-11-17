@@ -12,9 +12,9 @@
 Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTerm, VSCode extension, terminal trong VSCode) để không bỏ sót agent nào đã xong hoặc đang chờ bạn.
 
 - **Hook** của Claude Code ghi trạng thái từng phiên vào `~/.claude/ccmon/sessions/<session_id>.json`
-- **Thông báo macOS** khi agent xong lượt hoặc cần cấp quyền
+- **Thông báo desktop** (macOS, Linux `notify-send`, toast Windows) khi agent xong lượt hoặc cần cấp quyền
 - **Dashboard web** http://127.0.0.1:7788
-- **App desktop** "Claude Shepherd": cửa sổ riêng + badge trên Dock + biểu tượng trên menu bar, bấm vào phiên để nhảy tới đúng tab iTerm / cửa sổ VSCode
+- **App desktop** "Claude Shepherd" (macOS): cửa sổ riêng + badge trên Dock + biểu tượng trên menu bar, bấm vào phiên để nhảy tới đúng tab iTerm / cửa sổ VSCode
 - **Quota gói Claude** (5 giờ / 7 ngày, giống `/usage`) trên header app, tiêu đề cửa sổ, menu bar, dashboard web và statusLine của Claude Code
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
 - **Phiên Remote Control** mở từ điện thoại hoặc claude.ai: bấm một lần để resume trong tab iTerm (xem [bên dưới](#phiên-remote-control))
@@ -22,6 +22,33 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **CLI** `ccmon`
 
 ## Cài đặt
+
+Linux và Windows có CLI, hook, thông báo và dashboard web; app desktop chỉ có trên macOS. Cần Python 3.9+ (không cần thư viện ngoài).
+
+### Linux
+
+Tải gói ở [bản phát hành mới nhất](https://github.com/trantholock/claude-shepherd/releases/latest), rồi chạy `ccmon setup` **bằng user thường** (không `sudo`):
+
+```bash
+sudo apt install ./claude-shepherd_*_all.deb             # Debian, Ubuntu
+sudo dnf install ./claude-shepherd-*.noarch.rpm          # Fedora, RHEL, Rocky (openSUSE: zypper in)
+sudo pacman -U claude-shepherd-*-any.pkg.tar.zst         # Arch, Manjaro
+ccmon setup        # hook + dịch vụ systemd --user cho dashboard
+```
+
+Không có quyền root: giải nén `claude-shepherd-*-linux.tar.gz` rồi chạy `./install.sh` (cài vào `~/.local/bin`). Chạy `ccmon teardown` trước khi gỡ gói. Không có systemd (WSL, container) thì tự chạy `ccmon serve &`.
+
+### Windows
+
+Cài Python 3.9+ (`winget install Python.Python.3.12`), giải nén `claude-shepherd-*-windows.zip`, rồi:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1     # gỡ: uninstall.ps1
+```
+
+Không cần quyền admin: copy `ccmon` vào `%LOCALAPPDATA%\Programs\claude-shepherd`, thêm vào `PATH` của user, gắn hook và chạy dashboard khi đăng nhập.
+
+### macOS
 
 ```bash
 git clone https://github.com/trantholock/claude-shepherd.git
@@ -89,11 +116,11 @@ Claude Code gửi JSON cho lệnh `statusLine` sau mỗi lượt, có `rate_limi
 - `make install` chỉ đặt statusLine khi bạn chưa có statusLine riêng.
 - Tên hiển thị: tên tự đặt (`~/.claude/ccmon/names.json`) > `session_name` Claude tự đặt > tên thư mục.
 
-Tắt thông báo macOS: đặt `CCMON_NOTIFY=0` trong môi trường của Claude Code.
+Tắt thông báo: đặt `CCMON_NOTIFY=0` trong môi trường của Claude Code.
 
 ## Ngôn ngữ
 
-CLI, thông báo, dashboard và app theo ngôn ngữ chính của macOS (mặc định tiếng Anh, tiếng Việt nếu macOS đặt tiếng Việt). Để chọn cố định:
+CLI, thông báo, dashboard và app theo ngôn ngữ của hệ điều hành (mặc định tiếng Anh, tiếng Việt nếu OS đặt tiếng Việt; Linux theo `LANGUAGE`/`LANG`). Để chọn cố định:
 
 ```bash
 ccmon lang vi     # hoặc: en, auto

@@ -6,16 +6,16 @@
 
 [![CI](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml/badge.svg)](https://github.com/trantholock/claude-shepherd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
+![Platform: macOS · Linux · Windows](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey)
 
 ![Claude Shepherd dashboard: sessions move from running to done or waiting for permission](docs/demo.gif)
 
 Keep track of every **Claude Code** session you run in parallel (iTerm, the VS Code extension, the VS Code terminal) so you never miss an agent that has finished or is waiting on you.
 
 - **Claude Code hooks** write each session's state to `~/.claude/ccmon/sessions/<session_id>.json`
-- **macOS notifications** when an agent finishes a turn or needs permission
+- **Desktop notifications** (macOS, Linux `notify-send`, Windows toasts) when an agent finishes a turn or needs permission
 - **Web dashboard** at http://127.0.0.1:7788
-- **Desktop app** "Claude Shepherd": its own window, a Dock badge and a menu bar icon; click a session to jump to its iTerm tab or VS Code window
+- **Desktop app** "Claude Shepherd" (macOS): its own window, a Dock badge and a menu bar icon; click a session to jump to its iTerm tab or VS Code window
 - **Plan quota** (5-hour / 7-day, same as `/usage`) in the app header, window title, menu bar, web dashboard and the Claude Code status line
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **Remote Control sessions** started from your phone or claude.ai can be resumed in an iTerm tab with one click (see [below](#remote-control-sessions))
@@ -26,12 +26,46 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 
 ## Requirements
 
-- macOS 14 or later
-- Xcode Command Line Tools (`xcode-select --install`)
 - Claude Code
-- No third-party Python packages: everything runs on the system `/usr/bin/python3` (3.9+)
+- Python 3.9+, no third-party packages (macOS uses the system `/usr/bin/python3`)
+- macOS 14+ with Xcode Command Line Tools (`xcode-select --install`) for the desktop app
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| CLI, hooks, web dashboard, quota | ✅ | ✅ | ✅ |
+| Notifications | ✅ | ✅ `notify-send` | ✅ toast |
+| Dashboard starts at login | LaunchAgent | `systemd --user` | `HKCU\…\Run` |
+| Jump to a session | iTerm tab, VS Code | VS Code | VS Code |
+| Resume in a new terminal (`ccmon term`) | iTerm | GNOME Terminal, Konsole, kitty… | Windows Terminal |
+| Desktop app (Dock, menu bar) | ✅ | — | — |
 
 ## Install
+
+### Linux
+
+Download from the [latest release](https://github.com/trantholock/claude-shepherd/releases/latest), then run `ccmon setup` **as your normal user** (not `sudo`):
+
+```bash
+sudo apt install ./claude-shepherd_*_all.deb             # Debian, Ubuntu
+sudo dnf install ./claude-shepherd-*.noarch.rpm          # Fedora, RHEL, Rocky (openSUSE: zypper in)
+sudo pacman -U claude-shepherd-*-any.pkg.tar.zst         # Arch, Manjaro
+ccmon setup        # hooks + systemd --user service for the dashboard
+```
+
+Without root, use the tarball: extract `claude-shepherd-*-linux.tar.gz` and run `./install.sh` (installs `~/.local/bin/ccmon`).
+Run `ccmon teardown` before removing the package. Without systemd (WSL, containers), start the dashboard yourself with `ccmon serve &`.
+
+### Windows
+
+Install Python 3.9+ (`winget install Python.Python.3.12`), unzip `claude-shepherd-*-windows.zip` from the [latest release](https://github.com/trantholock/claude-shepherd/releases/latest), then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1     # uninstall: uninstall.ps1
+```
+
+This copies `ccmon` to `%LOCALAPPDATA%\Programs\claude-shepherd`, adds it to your user `PATH`, adds the hooks and starts the dashboard at login. No admin rights needed.
+
+### macOS
 
 ```bash
 git clone https://github.com/trantholock/claude-shepherd.git
@@ -87,15 +121,19 @@ To keep `claude remote-control` running all the time, start it from a LaunchAgen
 ccmon [ls] [-a] [text] status table (-a includes closed sessions; text filters it)
 ccmon watch            table that refreshes every 2s
 ccmon serve [port]     web dashboard (default 7788)
-ccmon focus <id>       jump to the session's iTerm tab / VS Code window (Remote: resume in iTerm)
-ccmon term <id>        open the session in a new iTerm tab (claude --resume)
+ccmon focus <id>       jump to the session's iTerm tab / VS Code window (Remote: resume in a terminal)
+ccmon term <id>        open the session in a new terminal tab (claude --resume)
 ccmon ack [id|all]     mark as seen
 ccmon clean            delete closed sessions
 ccmon name <id> [name] set a session name (empty name = clear it)
 ccmon usage            5h / 7d quota
 ccmon lang [en|vi|auto] UI language
 ccmon statusline       (used as Claude Code's statusLine command)
+ccmon setup|teardown   Linux/Windows: add/remove hooks + login service (--no-service: hooks only)
+ccmon version
 ```
+
+On Linux, `ccmon term` uses `$CCMON_TERMINAL` if set (for example `CCMON_TERMINAL="kitty -e"`), otherwise the first terminal it finds.
 
 ## Quota and session names
 
@@ -105,11 +143,11 @@ After each turn Claude Code sends JSON to the `statusLine` command, including `r
 - `make install` only sets `statusLine` if you don't already have your own.
 - Display name priority: your custom name (`~/.claude/ccmon/names.json`) > Claude's `session_name` > folder name.
 
-To disable macOS notifications, set `CCMON_NOTIFY=0` in Claude Code's environment.
+To disable notifications, set `CCMON_NOTIFY=0` in Claude Code's environment.
 
 ## Language
 
-The CLI, notifications, web dashboard and app follow your macOS language (English by default, Vietnamese if macOS is set to Vietnamese). To override it:
+The CLI, notifications, web dashboard and app follow your OS language (English by default, Vietnamese if the OS is set to Vietnamese; on Linux `LANGUAGE`/`LANG`). To override it:
 
 ```bash
 ccmon lang vi     # or: en, auto
@@ -127,8 +165,12 @@ app/Info.plist
 launchd/*.plist.tmpl        LaunchAgents: ccmon serve + open the app at login
 scripts/install.sh          full install
 scripts/build-app.sh        builds the app into build/ and copies it to ~/Applications
-scripts/hooks.py            add/remove hooks + statusLine in ~/.claude/settings.json
+scripts/hooks.py            add/remove hooks + statusLine (wrapper around ccmon settings_hooks)
 scripts/uninstall.sh
+scripts/install.ps1         Windows install / uninstall.ps1
+scripts/dist.sh             build Linux/Windows release packages into dist/ (nfpm)
+packaging/nfpm.yaml         .deb / .rpm / Arch package definition
+tests/smoke.py              cross-platform smoke test (make check, CI)
 ```
 
 ## API (`ccmon serve`)
@@ -143,6 +185,8 @@ The server only listens on `127.0.0.1`.
 - Sessions opened before the hooks were installed only appear after their next prompt. In VS Code, run **Reload Window**.
 - The first time you focus or open an iTerm tab, macOS asks for Automation permission → Allow.
 - Notifications may be listed under "Script Editor" in System Settings → Notifications.
+- Linux: no notifications → install `libnotify-bin` (Debian/Ubuntu) or `libnotify`. Dashboard logs: `journalctl --user -u claude-shepherd`.
+- Windows: if `ccmon` is not found, open a new terminal so it picks up the new `PATH`.
 - Hook errors are logged to `~/.claude/ccmon/hook-errors.log`; the hook never breaks a Claude session.
 
 ## Contributing
