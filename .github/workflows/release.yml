@@ -21,7 +21,7 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install nfpm (pinned + checksum)
         run: |
           curl -fsSLo nfpm.tgz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
@@ -93,7 +93,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: dist
