@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
 ### Added
 
 - **Restore sessions that closed unexpectedly**, like Chrome's "Restore pages". A session whose `claude` process is gone without a `SessionEnd` hook (crash, `kill`, terminal or machine shut down, reboot) is shown as **Closed unexpectedly** at the top of the dashboard and the app, with **Restore all** / **Dismiss**. Restoring runs `claude --resume <id>` in a new terminal tab in the session's folder.
@@ -51,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - LaunchAgent labels and bundle ID renamed from `com.trantho.*` to `io.github.trantholock.*`; `make install` removes the old ones.
 
-[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/trantholock/claude-shepherd/releases/tag/v1.0.0
