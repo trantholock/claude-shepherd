@@ -20,6 +20,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **Remote Control sessions** started from your phone or claude.ai can be resumed in an iTerm tab with one click (see [below](#remote-control-sessions))
 - **Search** sessions by name, folder, prompt, reply or ID — accent-insensitive, every word must match (dashboard: `/` to focus, Esc to clear; app: ⌘F; CLI: `ccmon ls [-a] <text>`)
+- **Restore after a crash**: sessions that closed unexpectedly (crash, reboot, terminal killed) are offered for restore, like Chrome (see [below](#restoring-sessions-after-a-crash))
 - **`ccmon` CLI**
 
 - **English and Vietnamese** UI — more translations welcome
@@ -98,7 +99,8 @@ launchctl kickstart -k gui/$(id -u)/io.github.trantholock.ccmon
 | Done | `Stop` | finished the turn; shows the last reply |
 | Interrupted | transcript contains `Request interrupted by user` | you pressed Esc mid-turn |
 | Open, idle | `SessionStart` | a newly opened session |
-| Closed | `SessionEnd`, or the claude PID is gone | removed after 24h |
+| Closed unexpectedly | the claude PID is gone without `SessionEnd` (crash, reboot, kill) | offered for restore for 3 days |
+| Closed | `SessionEnd` | removed after 24h |
 
 `●` means unseen. A session is marked seen when you click **Open** / **Seen**, or when you send a new prompt.
 
@@ -115,6 +117,19 @@ To open the session in the browser instead, use **Web** on the dashboard or righ
 
 To keep `claude remote-control` running all the time, start it from a LaunchAgent with `caffeinate -is` and send its stdout to `/dev/null`. Its screen output redraws constantly and would otherwise grow the log by tens of MB a day.
 
+## Restoring sessions after a crash
+
+A session that disappears without Claude Code's `SessionEnd` hook (the app crashed, the terminal or the Mac was shut down, the process was killed, the machine rebooted) is marked **Closed unexpectedly**. The dashboard and the app show a banner with **Restore all** and **Dismiss**, and `ccmon serve` sends one notification. Restoring opens a new terminal tab (iTerm, Windows Terminal, or your Linux terminal) in the session's folder and runs `claude --resume <id>`, so the conversation continues where it stopped.
+
+```bash
+ccmon restore                 # list sessions that closed unexpectedly
+ccmon restore all             # reopen all of them (or: ccmon restore <id>)
+ccmon restore dismiss [id]    # don't offer them again
+ccmon restore mode auto       # reopen on its own, e.g. after a reboot (ask = default, off = disabled)
+```
+
+Only sessions with at least one prompt are offered, for up to 3 days. VS Code sessions are resumed in a terminal. The mode is stored in `~/.claude/ccmon/config.json`; `CCMON_RESTORE=ask|auto|off` takes precedence.
+
 ## CLI
 
 ```
@@ -127,6 +142,7 @@ ccmon ack [id|all]     mark as seen
 ccmon clean            delete closed sessions
 ccmon name <id> [name] set a session name (empty name = clear it)
 ccmon usage            5h / 7d quota
+ccmon restore [all|<id>|dismiss|mode ask|auto|off]  reopen sessions that closed unexpectedly
 ccmon lang [en|vi|auto] UI language
 ccmon statusline       (used as Claude Code's statusLine command)
 ccmon setup|teardown   Linux/Windows: add/remove hooks + login service (--no-service: hooks only)
@@ -178,7 +194,7 @@ tests/smoke.py              cross-platform smoke test (make check, CI)
 The server only listens on `127.0.0.1`.
 
 - `GET  /api/sessions?all=0|1` → `{now, rows: [...], usage}`
-- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=` (requires the `X-CCMon: 1` header)
+- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=`, `/api/restore?id=<id|all>`, `/api/dismiss?id=<id|all>` (requires the `X-CCMon: 1` header)
 
 ## Troubleshooting
 

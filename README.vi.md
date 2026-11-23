@@ -19,6 +19,7 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
 - **Phiên Remote Control** mở từ điện thoại hoặc claude.ai: bấm một lần để resume trong tab iTerm (xem [bên dưới](#phiên-remote-control))
 - **Tìm kiếm** phiên theo tên, thư mục, prompt, câu trả lời hoặc ID — không phân biệt dấu, mọi từ phải khớp (dashboard: `/` để focus, Esc để xoá; app: ⌘F; CLI: `ccmon ls [-a] <từ khoá>`)
+- **Khôi phục sau khi bị tắt đột ngột** (giống Chrome): phiên bị crash, khởi động lại máy, terminal bị tắt sẽ hiện ở mục **Bị tắt đột ngột** với nút **Khôi phục tất cả** / **Bỏ qua**; khôi phục = `claude --resume <id>` trong tab terminal mới đúng thư mục. CLI: `ccmon restore`, `ccmon restore all|<id>`, `ccmon restore dismiss`, `ccmon restore mode ask|auto|off` (`auto`: tự mở lại, vd sau khi khởi động lại máy)
 - **CLI** `ccmon`
 
 ## Cài đặt

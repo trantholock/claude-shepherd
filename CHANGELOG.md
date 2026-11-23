@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
+### Added
+
+- **Restore sessions that closed unexpectedly**, like Chrome's "Restore pages". A session whose `claude` process is gone without a `SessionEnd` hook (crash, `kill`, terminal or machine shut down, reboot) is shown as **Closed unexpectedly** at the top of the dashboard and the app, with **Restore all** / **Dismiss**. Restoring runs `claude --resume <id>` in a new terminal tab in the session's folder.
+  - Only sessions with at least one prompt are offered, for 3 days. SDK/headless sessions are skipped. Boot time is checked so a PID reused after a reboot is not mistaken for the old session.
+  - `ccmon serve` sends one notification per crash. `ccmon restore mode auto` reopens sessions on its own instead (for example after a reboot); `ccmon restore mode off` turns the feature off.
+  - CLI: `ccmon restore` (list), `ccmon restore all|<id>`, `ccmon restore dismiss [id]`. API: `POST /api/restore?id=<id|all>`, `POST /api/dismiss?id=<id|all>`.
+  - On the first run, sessions that were already dead are marked closed, so you are not offered old sessions.
+
 ## [1.1.0] - 2026-11-17
 
 ### Added
@@ -43,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - LaunchAgent labels and bundle ID renamed from `com.trantho.*` to `io.github.trantholock.*`; `make install` removes the old ones.
 
-[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/trantholock/claude-shepherd/releases/tag/v1.0.0
