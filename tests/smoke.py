@@ -31,8 +31,21 @@ def run(*args, stdin=None):
     return out
 
 
-def hook(ev, **kw):
-    run("hook", stdin=json.dumps(dict(session_id=SID, hook_event_name=ev, cwd=HOME, **kw), ensure_ascii=False))
+def hook(ev, sid=SID, env=None, **kw):
+    data = json.dumps(dict(session_id=sid, hook_event_name=ev, cwd=HOME, **kw), ensure_ascii=False).encode("utf-8")
+    r = subprocess.run([sys.executable, CCMON, "hook"], input=data, capture_output=True,
+                       env=dict(ENV, **(env or {})), timeout=30)
+    assert r.returncode == 0, r.stderr
+
+
+def dead_pid():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return str(p.pid)
+
+
+def state_of(sid):
+    return json.load(open(os.path.join(HOME, ".claude", "ccmon", "sessions", sid + ".json"), encoding="utf-8"))
 
 
 def check(cond, msg):
@@ -56,6 +69,11 @@ check(m.pid_alive(os.getpid()), "pid_alive")
 check(m.is_claude_proc("claude.exe") and m.is_claude_proc("/usr/bin/node") and not m.is_claude_proc("bash"),
       "is_claude_proc")
 
+# phiên đã chết TRƯỚC lần chạy đầu của tính năng khôi phục -> không được đề nghị mở lại
+OLD = "0ld00000-dead-4000-8000-000000000001"
+hook("SessionStart", sid=OLD, env={"CLAUDE_PID": dead_pid()})
+hook("UserPromptSubmit", sid=OLD, prompt="phiên cũ")
+
 # vòng đời phiên qua hook, kèm tiếng Việt + emoji (bắt lỗi code page trên Windows)
 hook("SessionStart")
 hook("UserPromptSubmit", prompt="Sửa lỗi đăng nhập 🐑")
@@ -70,6 +88,45 @@ out = run("ls", "-a")
 check(SID[:8] in out and "DONE" in out, "ls shows the session as DONE")
 check(SID[:8] in run("ls", "-a", "dang nhap"), "accent-insensitive search")
 check("No sessions match" in run("ls", "-a", "khongcogi"), "search with no match")
+check(state_of(OLD)["status"] == "closed", "first run: sessions dead before the restore feature are just closed")
+
+# khôi phục phiên bị tắt đột ngột (crash/kill: không có SessionEnd, tiến trình claude đã chết)
+LOST = "1057aaaa-bbbb-4ccc-8ddd-eeeeffff0001"
+hook("SessionStart", sid=LOST, env={"CLAUDE_PID": dead_pid()})
+hook("UserPromptSubmit", sid=LOST, prompt="viết báo cáo DORA")
+out = run("ls")
+check(LOST[:8] in out and "CLOSED UNEXPECTEDLY" in out, "crashed session shows as CLOSED UNEXPECTEDLY without -a")
+check(state_of(LOST)["status"] == "lost", "lost state is persisted")
+check(LOST[:8] in run("restore"), "ccmon restore lists it")
+ENV["CCMON_RESTORE"] = "off"
+check("CLOSED UNEXPECTEDLY" not in run("ls", "-a"), "restore mode off: nothing offered")
+del ENV["CCMON_RESTORE"]
+run("restore", "dismiss", LOST[:8])
+check(state_of(LOST)["status"] == "closed" and LOST[:8] not in run("ls"), "dismiss closes it")
+NOPROMPT = "1057aaaa-bbbb-4ccc-8ddd-eeeeffff0002"
+hook("SessionStart", sid=NOPROMPT, env={"CLAUDE_PID": dead_pid()})
+run("ls")
+check(state_of(NOPROMPT)["status"] != "lost", "session without any prompt is not offered")
+
+if sys.platform.startswith("linux"):  # mở terminal thật: chỉ kiểm được trên Linux qua CCMON_TERMINAL
+    LOST2 = "1057aaaa-bbbb-4ccc-8ddd-eeeeffff0003"
+    hook("SessionStart", sid=LOST2, env={"CLAUDE_PID": dead_pid()})
+    hook("UserPromptSubmit", sid=LOST2, prompt="deploy portal")
+    rec = os.path.join(HOME, "term-args.json")
+    recorder = os.path.join(HOME, "rec.py")
+    open(recorder, "w").write("import json,sys;json.dump(sys.argv[1:],open(%r,'w'))" % rec)
+    ENV["CCMON_TERMINAL"] = '"%s" "%s"' % (sys.executable, recorder)
+    out = run("restore", "all")
+    for _ in range(50):
+        if os.path.exists(rec) and os.path.getsize(rec):
+            break
+        time.sleep(0.1)
+    args = json.load(open(rec))
+    check(LOST2[:8] + "  ok" in out and "claude --resume " + LOST2 in args[-1] and "--fork-session" not in args[-1],
+          "restore all opens claude --resume in a terminal: %r" % args)
+    check(state_of(LOST2)["reason"] == "restored", "restored session is marked")
+    hook("SessionStart", sid=LOST2, source="resume")
+    check(state_of(LOST2)["status"] == "idle", "resumed session comes back as open")
 
 sl = run("statusline", stdin=json.dumps({
     "session_id": SID, "session_name": "demo", "model": {"display_name": "Opus"},
@@ -121,6 +178,15 @@ try:
         check(False, "POST without X-CCMon must be rejected")
     except urllib.error.HTTPError as e:
         check(e.code == 403, "POST without X-CCMon -> 403")
+    LOST3 = "1057aaaa-bbbb-4ccc-8ddd-eeeeffff0004"
+    hook("SessionStart", sid=LOST3, env={"CLAUDE_PID": dead_pid()})
+    hook("UserPromptSubmit", sid=LOST3, prompt="api")
+    data = json.load(urllib.request.urlopen("http://127.0.0.1:%d/api/sessions" % port, timeout=2))
+    check(any(r["session_id"] == LOST3 and r["state"] == "lost" for r in data["rows"]), "API lists lost sessions")
+    req = urllib.request.Request("http://127.0.0.1:%d/api/dismiss?id=%s" % (port, LOST3), method="POST",
+                                 headers={"X-CCMon": "1"})
+    urllib.request.urlopen(req, timeout=2)
+    check(state_of(LOST3)["status"] == "closed", "POST /api/dismiss")
     html = urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=2).read().decode("utf-8")
     check("Claude Shepherd" in html, "GET / serves the dashboard")
 finally:

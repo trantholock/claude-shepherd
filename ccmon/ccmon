@@ -13,6 +13,8 @@
   ccmon usage           # Claude plan quota, 5h / 7d
   ccmon lang [en|vi|auto]  # UI language (default: follows the OS)
   ccmon statusline      # called by Claude Code statusLine: stores quota + session name
+  ccmon restore [all|<id>|dismiss [id]]  # reopen sessions that closed unexpectedly (crash, reboot)
+  ccmon restore mode [ask|auto|off]      # ask (default): notify + offer; auto: reopen on its own
   ccmon setup [--no-service]     # Linux/Windows: add hooks + start the dashboard at login
   ccmon teardown [--no-service]  # Linux/Windows: remove hooks + the login service (keeps data)
   ccmon version
@@ -42,9 +44,10 @@ SL_DIR = os.path.join(BASE, "statusline")   # dữ liệu statusLine theo phiên
 NAMES = os.path.join(BASE, "names.json")    # tên do người dùng đặt
 USAGE = os.path.join(BASE, "usage.json")    # quota gần nhất
 KEEP_CLOSED_SEC = 24 * 3600
+KEEP_LOST_SEC = 3 * 24 * 3600   # phiên bị tắt đột ngột được đề nghị khôi phục trong 3 ngày
 NOTIFY = os.environ.get("CCMON_NOTIFY", "1") != "0"
 
-ORDER = ["waiting", "done", "interrupted", "running", "idle", "closed"]
+ORDER = ["lost", "waiting", "done", "interrupted", "running", "idle", "closed"]
 
 
 # ---------- lưu trữ ----------
@@ -146,6 +149,7 @@ def label(st):
         "interrupted": T("INTERRUPTED", "BỊ NGẮT"),
         "idle": T("OPEN, IDLE", "MỞ, CHƯA LÀM"),
         "closed": T("CLOSED", "ĐÃ ĐÓNG"),
+        "lost": T("CLOSED UNEXPECTEDLY", "BỊ TẮT ĐỘT NGỘT"),
     }[st]
 
 
@@ -431,7 +435,7 @@ def hook():
     proj = title_of(s)
 
     if ev == "SessionStart":
-        if s["status"] in ("closed",):
+        if s["status"] in ("closed", "lost"):
             s["status"] = "idle"
     elif ev == "UserPromptSubmit":
         p = (data.get("prompt") or "").strip()
@@ -567,14 +571,69 @@ def ps_table():
     return t
 
 
+# ---------- khôi phục phiên bị tắt đột ngột (giống "Restore pages" của Chrome) ----------
+
+RESTORE_MODES = ("ask", "auto", "off")
+_BOOT = None
+
+
+def restore_mode():
+    m = os.environ.get("CCMON_RESTORE") or read_json(CONFIG, {}).get("restore") or "ask"
+    return m if m in RESTORE_MODES else "ask"
+
+
+def boot_time():
+    """Thời điểm máy khởi động (epoch). Phiên cập nhật lần cuối trước mốc này chắc chắn đã chết,
+    kể cả khi PID cũ đã bị một tiến trình claude khác dùng lại sau reboot."""
+    global _BOOT
+    if _BOOT is None:
+        _BOOT = 0
+        try:
+            if IS_LINUX:
+                with open("/proc/stat") as f:
+                    _BOOT = next(int(ln.split()[1]) for ln in f if ln.startswith("btime "))
+            elif IS_WIN:
+                import ctypes
+                ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+                _BOOT = time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
+            else:  # "{ sec = 1731800000, usec = 123 } Sun Nov ..."
+                out = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True)
+                _BOOT = int(re.search(r"sec = (\d+)", out).group(1))
+        except Exception:
+            _BOOT = 0
+    return _BOOT
+
+
+def restorable(s):
+    """Có đáng mở lại không: đã có ít nhất một prompt, không phải phiên SDK/headless."""
+    return (restore_mode() != "off" and bool(s.get("last_prompt") or s.get("first_prompt"))
+            and s.get("app") != "headless" and bool(re.match(r"^[A-Za-z0-9_-]+$", s.get("session_id", ""))))
+
+
+def _persist(sid, expect_updated, **fields):
+    """Ghi trạng thái mà không giẫm lên hook: chỉ ghi nếu file chưa bị hook cập nhật kể từ lúc đọc."""
+    cur = load(sid)
+    if cur and cur.get("updated") == expect_updated:
+        cur.update(fields)
+        save(cur)
+        return cur
+    return None
+
+
 def effective(s, procs):
     st = s.get("status", "idle")
     if st == "closed":
         return st
+    if st == "lost":
+        keep = restore_mode() != "off" and time.time() - s.get("lost_at", 0) < KEEP_LOST_SEC
+        return "lost" if keep else "closed"
     pid = s.get("pid")
     comm = procs.get(pid, "") if pid else ""
-    if pid and not is_claude_proc(comm, vscode=True):
-        return "closed"
+    # chết mà không có SessionEnd (crash, kill, tắt terminal/máy đột ngột) -> có thể khôi phục
+    dead = (pid and not is_claude_proc(comm, vscode=True)) or (boot_time() and s.get("updated", 0) < boot_time())
+    if dead:
+        recent = time.time() - s.get("updated", 0) < KEEP_LOST_SEC
+        return "lost" if recent and restorable(s) else "closed"
     if st == "running" and time.time() - s.get("updated", 0) > 30 and was_interrupted(s.get("transcript", "")):
         return "interrupted"
     return st
@@ -584,9 +643,19 @@ def snapshot(include_closed=False):
     procs = ps_table()
     now = time.time()
     names = read_json(NAMES, {})
+    cfg = read_json(CONFIG, {})
+    # lần đầu chạy bản có tính năng khôi phục: phiên đã chết từ trước coi như đã đóng, không đề nghị mở lại
+    first = "restore_since" not in cfg
     rows = []
     for s in all_sessions():
         st = effective(s, procs)
+        if st == "lost" and s.get("status") != "lost":
+            if first:
+                st = "closed"
+                _persist(s["session_id"], s.get("updated"), status="closed", reason="before-restore-feature")
+            else:
+                s = _persist(s["session_id"], s.get("updated"), status="lost", lost_at=now,
+                             lost_from=s.get("status")) or s
         if st == "closed" and now - s.get("updated", 0) > KEEP_CLOSED_SEC:
             try:
                 os.remove(_path(s["session_id"]))
@@ -595,7 +664,7 @@ def snapshot(include_closed=False):
             continue
         if st == "closed" and not include_closed:
             continue
-        if "remote" not in s and s.get("app") == "headless" and st != "closed":
+        if "remote" not in s and s.get("app") == "headless" and st not in ("closed", "lost"):
             s["remote"] = remote_url_of_pid(s.get("pid"))  # phiên ghi trước khi có nhận diện Remote
             if s["remote"]:
                 s["app"] = "Remote"
@@ -610,7 +679,68 @@ def snapshot(include_closed=False):
         s["cost"] = sl.get("cost")
         rows.append(s)
     rows.sort(key=lambda r: (ORDER.index(r["state"]), r.get("seen", True), -r.get("updated", 0)))
+    if first:
+        cfg = read_json(CONFIG, {})
+        cfg["restore_since"] = now
+        write_json(CONFIG, cfg)
     return rows
+
+
+def lost_sessions():
+    return [r for r in snapshot(True) if r["state"] == "lost"]
+
+
+def restore(target="all"):
+    """Mở lại phiên bị tắt đột ngột bằng `claude --resume` trong tab terminal mới.
+    Trả về [(session_id, kết quả)]. Bản ghi cũ đánh dấu closed/restored; khi claude resume,
+    SessionStart cùng session_id sẽ đưa nó về trạng thái mở."""
+    out = []
+    for r in lost_sessions():
+        sid = r["session_id"]
+        if target != "all" and not sid.startswith(target):
+            continue
+        s = load(sid)
+        if not s:
+            continue
+        res = term(s)
+        if res == "ok":
+            cur = load(sid)
+            if cur and cur.get("status") == "lost":
+                cur.update(status="closed", reason="restored", restored_at=time.time())
+                save(cur)
+        out.append((sid, res))
+        if IS_MAC:
+            time.sleep(0.3)  # iTerm tạo tab tuần tự, tránh dồn AppleScript
+    return out
+
+
+def dismiss(target="all"):
+    for s in all_sessions():
+        if s.get("status") == "lost" and (target == "all" or s["session_id"].startswith(target)):
+            s.update(status="closed", reason="dismissed")
+            save(s)
+
+
+def restore_watcher(interval=5):
+    """Chạy trong `ccmon serve`: phiên mới bị tắt đột ngột -> mode ask: báo một lần; auto: mở lại luôn."""
+    while True:
+        try:
+            fresh = [r for r in lost_sessions() if not r.get("lost_notified")]
+            for r in fresh:
+                _persist(r["session_id"], r.get("updated"), lost_notified=True)
+            if fresh and restore_mode() == "auto":
+                for r in fresh:
+                    restore(r["session_id"])
+                notify(T("🔄 Restored %d Claude session(s)", "🔄 Đã mở lại %d phiên Claude") % len(fresh),
+                       ", ".join(r["title"] for r in fresh)[:200])
+            elif fresh:
+                notify(T("⚠️ %d Claude session(s) closed unexpectedly", "⚠️ %d phiên Claude bị tắt đột ngột") % len(fresh),
+                       T("Restore: open Claude Shepherd or run `ccmon restore all` — ",
+                         "Khôi phục: mở Claude Shepherd hoặc chạy `ccmon restore all` — ")
+                       + ", ".join(r["title"] for r in fresh)[:160])
+        except Exception:
+            pass
+        time.sleep(interval)
 
 
 SEARCH_FIELDS = ("title", "name", "auto_name", "project", "cwd", "app", "session_id",
@@ -802,7 +932,7 @@ def term(s):
     st = effective(s, ps_table())
     remote = s.get("remote") or (remote_url_of_pid(s.get("pid")) if s.get("app") == "headless" else "")
     fork = False
-    if st != "closed":
+    if st not in ("closed", "lost"):
         if remote and st not in ("running", "waiting") and remote_url_of_pid(s.get("pid")):
             pid = s["pid"]
             try:
@@ -1101,12 +1231,19 @@ def serve(port):
             elif u.path == "/api/focus":
                 s = load(sid)
                 res = focus(s) if s else "notfound"
+            elif u.path == "/api/restore":
+                res = restore(sid or "all")
+            elif u.path == "/api/dismiss":
+                dismiss(sid or "all")
             elif u.path == "/api/term":
                 s = load(sid)
                 res = term(s) if s else "notfound"
             self._send(200, json.dumps({"result": res}))
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    if os.environ.get("CCMON_WATCH", "1") != "0":
+        import threading
+        threading.Thread(target=restore_watcher, daemon=True).start()
     os.makedirs(BASE, exist_ok=True)
     if sys.stderr is None:  # pythonw (Windows) không có stderr
         sys.stderr = open(os.path.join(BASE, "serve.log"), "a", encoding="utf-8")
@@ -1122,10 +1259,10 @@ PAGE = r"""<!doctype html><html lang="__LANG__"><head><meta charset="utf-8">
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7385;--line:#e3e6ec;
 --wait:#b7791f;--wait-bg:#fdf3e1;--done:#2f855a;--done-bg:#e6f6ec;--run:#2b6cb0;--run-bg:#e6effa;
---int:#97266d;--int-bg:#fbe9f3;--idle:#6b7385;--idle-bg:#eef0f4}
+--int:#97266d;--int-bg:#fbe9f3;--idle:#6b7385;--idle-bg:#eef0f4;--lost:#c53030;--lost-bg:#fdeaea}
 @media (prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1a1e26;--fg:#e4e7ee;--mut:#8b93a5;--line:#2a2f3a;
 --wait:#f6c063;--wait-bg:#3a2e17;--done:#68d391;--done-bg:#173226;--run:#7fb3f0;--run-bg:#18283d;
---int:#f08ac1;--int-bg:#3a1a2c;--idle:#8b93a5;--idle-bg:#232834}}
+--int:#f08ac1;--int-bg:#3a1a2c;--idle:#8b93a5;--idle-bg:#232834;--lost:#fc8181;--lost-bg:#3b1c1c}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
 h1{font-size:17px;margin:0 8px 0 0}
@@ -1153,6 +1290,8 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 .sub{font-weight:400}
 #q{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);width:220px}
 #q:focus{outline:none;border-color:var(--run)}
+.restore{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--lost-bg);color:var(--lost);border:1px solid var(--lost);border-radius:8px;padding:10px 14px;margin:4px 0 8px}
+.restore b{flex:1;min-width:200px}.restore button.pri{background:var(--lost);color:#fff;border-color:var(--lost)}
 </style></head><body>
 <header><h1>🐑 Claude Shepherd</h1><span id="sum"></span><span class="sp"></span><span class="q" id="quota"></span>
 <input type="search" id="q" autocomplete="off">
@@ -1169,9 +1308,9 @@ const fold=s=>String(s||"").toLowerCase().replace(/đ/g,"d").normalize("NFD").re
 const SF=["title","name","auto_name","project","cwd","app","session_id","last_prompt","reply","message","activity","model"];
 const match=(r,ws)=>{const h=fold(SF.map(k=>r[k]||"").join(" "));return ws.every(w=>h.includes(w))};
 document.getElementById("ackall").textContent=t("Mark all seen","Đánh dấu đã xem hết");
-const L={waiting:t("WAITING","CHỜ BẠN"),done:t("DONE","XONG"),running:t("RUNNING","ĐANG CHẠY"),interrupted:t("INTERRUPTED","BỊ NGẮT"),idle:t("OPEN, IDLE","MỞ, CHƯA LÀM"),closed:t("CLOSED","ĐÃ ĐÓNG")};
-const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle"};
-const G=[[t("Needs you","Cần bạn xử lý"),r=>(r.state=="waiting"||r.state=="done"||r.state=="interrupted")&&!r.seen],
+const L={waiting:t("WAITING","CHỜ BẠN"),done:t("DONE","XONG"),running:t("RUNNING","ĐANG CHẠY"),interrupted:t("INTERRUPTED","BỊ NGẮT"),idle:t("OPEN, IDLE","MỞ, CHƯA LÀM"),closed:t("CLOSED","ĐÃ ĐÓNG"),lost:t("CLOSED UNEXPECTEDLY","BỊ TẮT ĐỘT NGỘT")};
+const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle",lost:"lost"};
+const G=[[t("Closed unexpectedly","Bị tắt đột ngột"),r=>r.state=="lost"],[t("Needs you","Cần bạn xử lý"),r=>(r.state=="waiting"||r.state=="done"||r.state=="interrupted")&&!r.seen],
  [t("Running","Đang chạy"),r=>r.state=="running"],[t("Waiting for you","Chờ bạn"),r=>r.state=="waiting"&&r.seen],
  [t("Done / seen","Xong / đã xem"),r=>(r.state=="done"||r.state=="interrupted")&&r.seen],[t("Open, idle","Mở, chưa làm gì"),r=>r.state=="idle"],[t("Closed","Đã đóng"),r=>r.state=="closed"]];
 const esc=s=>(s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1191,7 +1330,8 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
  return `<div class="card ${nw?"new":""}" style="--c:var(--${c});--cb:var(--${c}-bg)">
  <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="${t("Rename","Đổi tên")}" onclick="ren('${r.session_id}')">✎</button></span>
  <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${t(ago(r.updated,now)+" ago",ago(r.updated,now)+" trước")}${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
- <span class="acts"><button onclick="act('focus','${r.session_id}')">${r.remote?"Terminal":t("Open","Mở")}</button>
+ <span class="acts">${r.state=="lost"?`<button onclick="act('restore','${r.session_id}')" title="claude --resume">${t("Restore","Khôi phục")}</button><button onclick="act('dismiss','${r.session_id}')">${t("Dismiss","Bỏ qua")}</button>`
+ :`<button onclick="act('focus','${r.session_id}')">${r.remote?"Terminal":t("Open","Mở")}</button>`}
  ${r.remote?`<button onclick="window.open('${r.remote}')">Web</button>`:""}
  ${r.state=="closed"?`<button onclick="act('term','${r.session_id}')" title="${t("claude --resume in a new terminal tab","claude --resume trong tab terminal mới")}">Terminal</button>`:""}
  ${nw?`<button onclick="act('ack','${r.session_id}')">${t("Seen","Đã xem")}</button>`:""}
@@ -1203,11 +1343,13 @@ async function load(){try{const all=document.getElementById("all").checked;
  LAST=await (await fetch("/api/sessions?all="+(all?1:0))).json();draw()}catch(e){}}
 function draw(){if(!LAST)return;const d=LAST,all=document.getElementById("all").checked,ws=fold(Q.value).split(/\s+/).filter(Boolean);
  const now=d.now,rows=ws.length?d.rows.filter(r=>match(r,ws)):d.rows;
- const need=rows.filter(G[0][1]).length,run=rows.filter(r=>r.state=="running").length;
+ const need=rows.filter(G[1][1]).length,run=rows.filter(r=>r.state=="running").length;
  document.title=(need?`(${need}) `:"")+"Claude Shepherd";
  document.getElementById("quota").innerHTML=quota(d.usage,now);
  document.getElementById("sum").innerHTML=`<span class="pill" style="background:var(--wait-bg);color:var(--wait)">${need} ${t("need you","cần bạn")}</span> <span class="pill" style="background:var(--run-bg);color:var(--run)">${run} ${t("running","đang chạy")}</span> <span class="mut">${ws.length?rows.length+"/"+d.rows.length:rows.length} ${t("sessions","phiên")}</span>`;
- const used=new Set();let h="";for(const [ti,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
+ const lost=d.rows.filter(r=>r.state=="lost").length;let h=lost?`<div class="restore"><b>⚠️ ${lost} ${t("session(s) closed unexpectedly (crash, reboot, terminal killed).","phiên bị tắt đột ngột (crash, khởi động lại, terminal bị tắt).")}</b>
+ <button class="pri" onclick="act('restore','all')">${t("Restore all","Khôi phục tất cả")}</button><button onclick="act('dismiss','all')">${t("Dismiss","Bỏ qua")}</button></div>`:"";
+ const used=new Set();for(const [ti,f] of G){const g=rows.filter(r=>!used.has(r.session_id)&&f(r));g.forEach(r=>used.add(r.session_id));
  if(g.length)h+=`<h2>${ti} (${g.length})</h2>`+g.map(r=>card(r,now)).join("")}
  document.getElementById("m").innerHTML=h||`<div class="empty">${ws.length
   ?esc(t(`No sessions match "${Q.value.trim()}"`,`Không có phiên nào khớp "${Q.value.trim()}"`))+(all?"":"<br>"+t("Tick “show closed sessions” to search those too.","Bật “hiện phiên đã đóng” để tìm cả phiên đã đóng."))
@@ -1290,6 +1432,33 @@ def main():
         setup("install" if cmd == "setup" else "uninstall", "--no-service" not in a)
     elif cmd in ("version", "--version", "-V"):
         print("ccmon %s" % VERSION)
+    elif cmd == "restore":
+        sub = a[1] if len(a) > 1 else ""
+        if sub == "mode":
+            if len(a) > 2 and a[2] in RESTORE_MODES:
+                cfg = read_json(CONFIG, {})
+                cfg["restore"] = a[2]
+                write_json(CONFIG, cfg)
+            print("restore mode: %s" % restore_mode())
+        elif sub == "dismiss":
+            dismiss(a[2] if len(a) > 2 else "all")
+        elif sub:
+            res = restore(sub)
+            if not res:
+                print(T("no session closed unexpectedly matches '%s'", "không có phiên bị tắt đột ngột nào khớp '%s'") % sub)
+            for sid, r in res:
+                print("%s  %s" % (sid[:8], r))
+        else:
+            rows = lost_sessions()
+            if not rows:
+                print(T("No sessions closed unexpectedly.", "Không có phiên nào bị tắt đột ngột."))
+            now = time.time()
+            for r in rows:
+                print("%-8s  %-24s %6s  %s" % (r["session_id"][:8], r["title"][:24],
+                                              fmt_dur(now - r.get("updated", now)), (r.get("last_prompt") or "")[:80]))
+            if rows:
+                print(T("\nccmon restore all | ccmon restore <id> | ccmon restore dismiss [id]",
+                        "\nccmon restore all | ccmon restore <id> | ccmon restore dismiss [id]"))
     elif cmd == "clean":
         procs = ps_table()
         for s in all_sessions():

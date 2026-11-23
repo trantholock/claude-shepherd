@@ -68,9 +68,9 @@ func resetText(_ t: Double?, _ now: Double) -> String {
 
 let LABEL = ["waiting": t("WAITING", "CHỜ BẠN"), "done": t("DONE", "XONG"), "running": t("RUNNING", "ĐANG CHẠY"),
              "interrupted": t("INTERRUPTED", "BỊ NGẮT"), "idle": t("OPEN, IDLE", "MỞ, CHƯA LÀM"),
-             "closed": t("CLOSED", "ĐÃ ĐÓNG")]
+             "closed": t("CLOSED", "ĐÃ ĐÓNG"), "lost": t("CLOSED UNEXPECTEDLY", "BỊ TẮT ĐỘT NGỘT")]
 let COLOR: [String: Color] = ["waiting": .orange, "done": .green, "running": .blue,
-                              "interrupted": .pink, "idle": .gray, "closed": .gray]
+                              "interrupted": .pink, "idle": .gray, "closed": .gray, "lost": .red]
 
 func ago(_ t: Double?, _ now: Double) -> String {
     let s = Int(max(0, now - (t ?? now)))
@@ -99,6 +99,7 @@ final class Store: ObservableObject {
 
     var need: Int { rows.filter { $0.isNew }.count }
     var running: Int { rows.filter { $0.state == "running" }.count }
+    var lost: Int { rows.filter { $0.state == "lost" }.count }
 
     func refresh() {
         let url = URL(string: "\(base)/api/sessions?all=\(showClosed ? 1 : 0)")!
@@ -137,6 +138,9 @@ final class Store: ObservableObject {
 
     // claude --resume trong tab iTerm mới (fork nếu phiên còn sống nơi khác, vd Remote Control)
     func term(_ id: String) { ccmon("term", id) }
+
+    // mở lại phiên bị tắt đột ngột ("all" = tất cả) — chạy từ app để quyền Automation (iTerm) gắn với app
+    func restore(_ id: String) { ccmon("restore", id) }
 
     private func ccmon(_ cmd: String, _ id: String) {
         let p = Process()
@@ -225,10 +229,17 @@ struct RowView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(r.isNew ? c.opacity(0.7) : .clear, lineWidth: 1.5))
         .contentShape(Rectangle())
         .onHover { hover = $0 }
-        .onTapGesture { store.focus(r.session_id) }
-        .help(r.isRemote ? t("Session from mobile (Remote Control) — click to resume it in an iTerm tab", "Phiên mở từ mobile (Remote Control) — bấm để resume trong tab iTerm")
+        .onTapGesture { r.state == "lost" ? store.restore(r.session_id) : store.focus(r.session_id) }
+        .help(r.state == "lost" ? t("Closed unexpectedly — click to restore it (claude --resume in a new iTerm tab)",
+                                    "Bị tắt đột ngột — bấm để khôi phục (claude --resume trong tab iTerm mới)") :
+              r.isRemote ? t("Session from mobile (Remote Control) — click to resume it in an iTerm tab", "Phiên mở từ mobile (Remote Control) — bấm để resume trong tab iTerm")
                          : t("Click to open this session's tab/window", "Bấm để mở tab/cửa sổ của phiên này"))
         .contextMenu {
+            if r.state == "lost" {
+                Button(t("Restore session", "Khôi phục phiên")) { store.restore(r.session_id) }
+                Button(t("Dismiss", "Bỏ qua")) { store.act("dismiss", r.session_id) }
+                Divider()
+            }
             Button(r.isRemote ? t("Resume in Terminal", "Resume trong Terminal") : t("Open session", "Mở phiên")) { store.focus(r.session_id) }
             if r.isRemote, let u = URL(string: r.remote ?? "") {
                 Button(t("Open on web (claude.ai)", "Mở trên web (claude.ai)")) { NSWorkspace.shared.open(u) }
@@ -299,6 +310,7 @@ struct Panel: View {
     var groups: [(String, [Row])] {
         var used = Set<String>()
         let defs: [(String, (Row) -> Bool)] = [
+            (t("Closed unexpectedly", "Bị tắt đột ngột"), { $0.state == "lost" }),
             (t("Needs you", "Cần bạn xử lý"), { $0.isNew }),
             (t("Running", "Đang chạy"), { $0.state == "running" }),
             (t("Waiting for you", "Chờ bạn"), { $0.state == "waiting" }),
@@ -345,6 +357,19 @@ struct Panel: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
             .padding(.horizontal, 10).padding(.bottom, 8)
             Divider()
+            if store.online && store.lost > 0 {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+                    Text("\(store.lost) " + t("session(s) closed unexpectedly", "phiên bị tắt đột ngột"))
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Button(t("Restore all", "Khôi phục tất cả")) { store.restore("all") }.controlSize(.small)
+                    Button(t("Dismiss", "Bỏ qua")) { store.act("dismiss", "all") }.controlSize(.small)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.red.opacity(0.1))
+                Divider()
+            }
             if !store.online {
                 VStack(spacing: 8) {
                     Text(t("Can't reach ccmon (127.0.0.1:7788)", "Không kết nối được ccmon (127.0.0.1:7788)")).foregroundColor(.secondary)
@@ -397,6 +422,7 @@ struct ClaudeShepherdApp: App {
     // "🟠2 🔵3 · 46% · 81%"
     var menuTitle: String {
         var parts: [String] = []
+        if store.lost > 0 { parts.append("🔴\(store.lost)") }
         if store.need > 0 { parts.append("🟠\(store.need)") }
         if store.running > 0 { parts.append("🔵\(store.running)") }
         var s = parts.isEmpty ? "✦" : parts.joined(separator: " ")
