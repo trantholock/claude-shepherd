@@ -5,6 +5,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-26
+
+### Added
+
+- **Session tags** to find sessions faster.
+  - Write `[task service-a]` at the start of a line or at the end of a prompt to tag the session. Brackets in code (`arr[i]`), checklists, markdown links and Claude Code's `[Image #1]` placeholders are ignored.
+  - The group, as typed, prefixes the session name in the dashboard, the app, the CLI and notifications, for example `[vi du] my-repo`. The latest prompt with a group wins.
+  - Automatic tags from keywords in the prompt, in English and Vietnamese, for the kind of work (bug, feature, refactor, test, docs, release, review, perf, security, ci, question) and the stack (k8s, docker, terraform, ansible, argocd, postgres, python, go, js, shell, linux, windows…). Computed locally.
+  - Search with `#tag` or `tag:tag` in the dashboard, the app and `ccmon ls`. Click a tag to filter by it.
+  - Edit tags with the 🏷 button (dashboard), **Edit tags…** (app) or `ccmon tag <id> +a -b`. `ccmon tags` lists every tag. API: `POST /api/tags?id=&tags=`.
+
 ## [1.2.0] - 2026-11-23
 
 ### Added
@@ -53,7 +64,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - LaunchAgent labels and bundle ID renamed from `com.trantho.*` to `io.github.trantholock.*`; `make install` removes the old ones.
 
-[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/trantholock/claude-shepherd/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/trantholock/claude-shepherd/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/trantholock/claude-shepherd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/trantholock/claude-shepherd/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/trantholock/claude-shepherd/releases/tag/v1.0.0

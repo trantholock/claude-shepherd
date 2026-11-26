@@ -138,6 +138,27 @@ check("46%" in run("usage"), "usage")
 run("name", SID[:8], "Tên phiên")
 check("Tên phiên" in run("ls", "-a"), "custom session name")
 
+# tag: "[a b]" trong prompt + tag tự động + sửa tay + tìm "#tag" / "tag:"
+TAGGED = "7a6aaaaa-bbbb-4ccc-8ddd-eeeeffff0005"
+hook("SessionStart", sid=TAGGED)
+hook("UserPromptSubmit", sid=TAGGED, prompt="[Task service-a] sửa lỗi deploy trên k8s\n[Image #1]")
+st = state_of(TAGGED)
+check(st["tags"] == ["task", "service-a"] and {"bug", "k8s", "release"} <= set(st["auto_tags"]),
+      "tags from [..] + automatic tags: %r %r" % (st["tags"], st["auto_tags"]))
+hook("UserPromptSubmit", sid=TAGGED, prompt="viết test cho arr[i]")
+check(state_of(TAGGED)["tags"] == ["task", "service-a"] and "test" in state_of(TAGGED)["auto_tags"],
+      "tags accumulate; arr[i] is not a tag")
+out = run("tag", TAGGED[:8], "+ddi", "-k8s")
+check("#ddi" in out and "#k8s" not in out, "ccmon tag +/-: %r" % out)
+check(TAGGED[:8] in run("ls", "-a", "tag:service") and TAGGED[:8] not in run("ls", "-a", "tag:nope")
+      and TAGGED[:8] not in run("ls", "-a", "#k8s"), "search by tag")
+check("#task" in run("tags"), "ccmon tags")
+check("[Task service-a] " in run("ls", "-a", "tag:task"), "session name gets the [..] prefix as typed")
+hook("UserPromptSubmit", sid=TAGGED, prompt="[vi du] tiếp tục")
+check("[vi du] " in run("ls", "-a", "#vi") and "[Task" not in run("ls", "-a", "#vi"), "latest [..] becomes the prefix")
+run("tag", TAGGED[:8], "-vi", "-du")
+o = run("ls", "-a", TAGGED[:8]); check("[vi du] ccmon-smoke" not in o, "prefix hidden once its tags are removed: %r" % o)
+
 # setup/teardown chỉ phần hook (không cài dịch vụ) — macOS dùng make install
 if sys.platform != "darwin":
     settings = os.path.join(HOME, ".claude", "settings.json")
@@ -187,6 +208,12 @@ try:
                                  headers={"X-CCMon": "1"})
     urllib.request.urlopen(req, timeout=2)
     check(state_of(LOST3)["status"] == "closed", "POST /api/dismiss")
+    req = urllib.request.Request("http://127.0.0.1:%d/api/tags?id=%s&tags=%s" % (port, TAGGED, "x%20task"),
+                                 method="POST", headers={"X-CCMon": "1"})
+    urllib.request.urlopen(req, timeout=2)
+    data = json.load(urllib.request.urlopen("http://127.0.0.1:%d/api/sessions?all=1" % port, timeout=2))
+    check([r["tags"] for r in data["rows"] if r["session_id"] == TAGGED] == [["x", "task"]],
+          "POST /api/tags replaces the tag list")
     html = urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=2).read().decode("utf-8")
     check("Claude Shepherd" in html, "GET / serves the dashboard")
 finally:

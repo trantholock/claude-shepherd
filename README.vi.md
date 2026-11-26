@@ -19,6 +19,7 @@ Theo dõi trạng thái mọi phiên **Claude Code** đang chạy song song (iTe
 - **Đặt tên phiên** cho dễ nhớ (✎ trên dashboard, chuột phải → Đổi tên… trong app, hoặc `ccmon name`)
 - **Phiên Remote Control** mở từ điện thoại hoặc claude.ai: bấm một lần để resume trong tab iTerm (xem [bên dưới](#phiên-remote-control))
 - **Tìm kiếm** phiên theo tên, thư mục, prompt, câu trả lời hoặc ID — không phân biệt dấu, mọi từ phải khớp (dashboard: `/` để focus, Esc để xoá; app: ⌘F; CLI: `ccmon ls [-a] <từ khoá>`)
+- **Tag**: mở đầu prompt bằng `[task service-a]` để gắn tag cho phiên; các chủ đề thường gặp (bug, feature, docs, k8s, python…) được gắn tự động. Lọc bằng `#tag` hoặc `tag:tag`
 - **Khôi phục sau khi bị tắt đột ngột** (giống Chrome): phiên bị crash, khởi động lại máy, terminal bị tắt sẽ hiện ở mục **Bị tắt đột ngột** với nút **Khôi phục tất cả** / **Bỏ qua**; khôi phục = `claude --resume <id>` trong tab terminal mới đúng thư mục. CLI: `ccmon restore`, `ccmon restore all|<id>`, `ccmon restore dismiss`, `ccmon restore mode ask|auto|off` (`auto`: tự mở lại, vd sau khi khởi động lại máy)
 - **CLI** `ccmon`
 
@@ -93,6 +94,23 @@ Muốn mở trên trình duyệt thì dùng nút **Web** trên dashboard, hoặc
 
 Để `claude remote-control` luôn chạy, hãy khởi động nó bằng LaunchAgent với `caffeinate -is` và cho stdout vào `/dev/null`. Màn hình của nó vẽ lại liên tục, nếu ghi hết vào log thì log tăng hàng chục MB mỗi ngày.
 
+## Tag
+
+Mỗi prompt được quét để lấy tag:
+
+- **Tag của bạn**: nhóm `[...]` ở đầu một dòng hoặc cuối prompt, các từ cách nhau bởi dấu cách hoặc dấu phẩy. `[task service-a] sửa lỗi login` gắn `#task` và `#service-a`. Tag nhiều từ thì nối bằng `-`. Nhóm `[...]` (giữ nguyên như bạn gõ) cũng được gắn làm tiền tố tên phiên: `[vi du] my-repo` (lấy theo prompt gần nhất có nhóm `[...]`; bỏ hết tag trong nhóm thì tiền tố biến mất). Ngoặc vuông nằm giữa câu hoặc trong code (`arr[i]`, `- [x]`, `[text](url)`) và placeholder `[Image #1]` / `[Pasted text …]` của Claude Code được bỏ qua.
+- **Tag tự động** (viền đứt): luật từ khoá tiếng Anh + tiếng Việt cho loại việc (`bug`, `feature`, `refactor`, `test`, `docs`, `release`, `review`, `perf`, `security`, `ci`, `question`) và stack (`k8s`, `docker`, `terraform`, `ansible`, `argocd`, `postgres`, `python`, `go`, `js`, `shell`, `linux`, `windows`…). Chạy bằng regex ngay trên máy, prompt không gửi đi đâu.
+
+Tag cộng dồn theo phiên (mới nhất trước, tối đa 20 tag của bạn + 8 tag tự động). Tìm bằng `#tag` hoặc `tag:tag` (khớp tiền tố, kết hợp được với từ khoá khác), hoặc bấm vào tag trên dashboard/app.
+
+```bash
+ccmon ls -a tag:service-a     # (trong bash phải quote '#tag' hoặc dùng tag:)
+ccmon tag <id> +ddi -k8s      # thêm / bỏ tag (hoặc 🏷 trên dashboard, "Sửa tag…" trong app)
+ccmon tags                    # mọi tag kèm số phiên
+```
+
+Tag thêm/bỏ bằng tay lưu ở `~/.claude/ccmon/tags.json`; tag tự động đã bỏ sẽ không tự hiện lại.
+
 ## CLI
 
 ```
@@ -104,6 +122,8 @@ ccmon term <id>       mở phiên trong tab iTerm mới (claude --resume)
 ccmon ack [id|all]    đánh dấu đã xem
 ccmon clean           xóa phiên đã đóng
 ccmon name <id> [tên] đặt tên phiên (bỏ trống = xóa tên tự đặt)
+ccmon tag <id> [+t|-t] xem / thêm / bỏ tag
+ccmon tags            mọi tag kèm số phiên
 ccmon usage           quota 5h / 7 ngày
 ccmon lang [en|vi|auto] ngôn ngữ giao diện
 ccmon statusline      (dùng cho statusLine của Claude Code)
@@ -146,7 +166,7 @@ scripts/uninstall.sh
 ## API (ccmon serve)
 
 - `GET  /api/sessions?all=0|1` → `{now, rows: [...]}`
-- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=` (bắt buộc header `X-CCMon: 1`)
+- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=`, `/api/tags?id=&tags=a%20b` (thay cả danh sách) (bắt buộc header `X-CCMon: 1`)
 
 ## Ghi chú
 

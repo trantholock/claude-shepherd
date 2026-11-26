@@ -21,6 +21,8 @@ struct Row: Codable, Identifiable {
     let remote: String?
     let cwd: String?
     let model: String?
+    let tags: [String]?
+    let auto_tags: [String]?
     var id: String { session_id }
     var isRemote: Bool { !(remote ?? "").isEmpty }
     var displayTitle: String { title ?? project ?? "?" }
@@ -28,10 +30,20 @@ struct Row: Codable, Identifiable {
     var isNew: Bool { ["waiting", "done", "interrupted"].contains(state) && !(seen ?? true) }
     // cùng các trường với SEARCH_FIELDS trong ccmon
     var haystack: String {
-        fold([title, name, auto_name, project, cwd, app, session_id, last_prompt, reply, message, activity, model]
-            .compactMap { $0 }.joined(separator: " "))
+        fold(([title, name, auto_name, project, cwd, app, session_id, last_prompt, reply, message, activity, model]
+            .compactMap { $0 } + (tags ?? [])).joined(separator: " "))
     }
-    func matches(_ words: [String]) -> Bool { let h = haystack; return words.allSatisfy { h.contains($0) } }
+    // giống matches() trong ccmon: "#x" / "tag:x" = phải có tag bắt đầu bằng x
+    func matches(_ words: [String]) -> Bool {
+        let h = haystack, tg = (tags ?? []).map(fold)
+        return words.allSatisfy { w in
+            for p in ["#", "tag:"] where w.hasPrefix(p) {
+                let x = String(w.dropFirst(p.count))
+                return tg.contains { $0.hasPrefix(x) }
+            }
+            return h.contains(w)
+        }
+    }
 }
 
 // chữ thường + bỏ dấu ("Đổi" -> "doi"), giống fold() trong ccmon
@@ -168,6 +180,29 @@ final class Store: ObservableObject {
         }
     }
 
+    func editTags(_ r: Row) {
+        let alert = NSAlert()
+        alert.messageText = t("Edit tags", "Sửa tag")
+        alert.informativeText = "\(r.displayTitle) · \(r.session_id.prefix(8))\n" +
+            t("Separate tags with spaces. Tip: start a prompt with [tag1 tag2].", "Các tag cách nhau bởi dấu cách. Mẹo: mở đầu prompt bằng [tag1 tag2].")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = (r.tags ?? []).joined(separator: " ")
+        alert.accessoryView = field
+        alert.addButton(withTitle: t("Save", "Lưu"))
+        alert.addButton(withTitle: t("Cancel", "Hủy"))
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        if alert.runModal() == .alertFirstButtonReturn {
+            act("tags", r.session_id, [URLQueryItem(name: "tags", value: field.stringValue)])
+        }
+    }
+
+    // bấm vào tag -> thêm "#tag" vào ô tìm kiếm
+    func filterTag(_ tag: String) {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        if !words.contains(fold("#" + tag)) { query = (q.isEmpty ? "" : q + " ") + "#" + tag }
+    }
+
     func startServer() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -216,6 +251,21 @@ struct RowView: View {
                         Text(ago(r.updated, now)).font(.system(size: 11)).foregroundColor(.secondary)
                     }
                 }
+                if let tg = r.tags, !tg.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(tg.prefix(8), id: \.self) { g in
+                            let auto = (r.auto_tags ?? []).contains(g)
+                            Button { store.filterTag(g) } label: {
+                                Text("#" + g).font(.system(size: 10))
+                                    .padding(.horizontal, 6).padding(.vertical, 1)
+                                    .foregroundColor(auto ? .secondary : .accentColor)
+                                    .background(Capsule().fill(Color.primary.opacity(auto ? 0.04 : 0.08)))
+                            }
+                            .buttonStyle(.plain)
+                            .help(auto ? t("Automatic tag — click to filter", "Tag tự động — bấm để lọc") : t("Click to filter", "Bấm để lọc"))
+                        }
+                    }
+                }
                 if let p = r.last_prompt, !p.isEmpty {
                     Text("» " + p).font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
                 }
@@ -248,6 +298,7 @@ struct RowView: View {
                 Button(t("Resume in Terminal", "Mở lại trong Terminal")) { store.term(r.session_id) }
             }
             Button(t("Rename…", "Đổi tên…")) { store.rename(r) }
+            Button(t("Edit tags…", "Sửa tag…")) { store.editTags(r) }
             if r.isNew { Button(t("Mark as seen", "Đánh dấu đã xem")) { store.act("ack", r.session_id) } }
             Button("Copy session ID") {
                 NSPasteboard.general.clearContents()
@@ -342,7 +393,7 @@ struct Panel: View {
             QuotaView()
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField(t("Search name, folder, prompt, reply…", "Tìm theo tên, thư mục, prompt, trả lời…"), text: $store.query)
+                TextField(t("Search name, folder, prompt, #tag…", "Tìm theo tên, thư mục, prompt, #tag…"), text: $store.query)
                     .textFieldStyle(.plain).focused($searchFocused)
                     .onExitCommand { store.query = ""; searchFocused = false }
                 if !store.query.isEmpty {

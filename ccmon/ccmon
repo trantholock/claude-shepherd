@@ -10,6 +10,8 @@
   ccmon ack <id|all>    # mark as seen
   ccmon clean           # delete closed sessions
   ccmon name <id> [name] # give a session a memorable name (empty = clear)
+  ccmon tag <id> [+t|-t ...]  # show / add / remove tags (tags also come from "[t1 t2]" in a prompt)
+  ccmon tags            # every tag with its session count (search: ccmon ls tag:t  or  #t)
   ccmon usage           # Claude plan quota, 5h / 7d
   ccmon lang [en|vi|auto]  # UI language (default: follows the OS)
   ccmon statusline      # called by Claude Code statusLine: stores quota + session name
@@ -31,7 +33,7 @@ import time
 import unicodedata
 from urllib.parse import unquote
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
@@ -42,6 +44,7 @@ BASE = os.path.expanduser("~/.claude/ccmon")
 STATE = os.path.join(BASE, "sessions")
 SL_DIR = os.path.join(BASE, "statusline")   # dữ liệu statusLine theo phiên (tách file để không giẫm lên hook)
 NAMES = os.path.join(BASE, "names.json")    # tên do người dùng đặt
+TAGS = os.path.join(BASE, "tags.json")      # tag người dùng thêm/bỏ bằng tay: {sid: {"add": [...], "del": [...]}}
 USAGE = os.path.join(BASE, "usage.json")    # quota gần nhất
 KEEP_CLOSED_SEC = 24 * 3600
 KEEP_LOST_SEC = 3 * 24 * 3600   # phiên bị tắt đột ngột được đề nghị khôi phục trong 3 ngày
@@ -163,14 +166,155 @@ def set_name(sid, name):
     write_json(NAMES, names)
 
 
-def title_of(s, names=None, sl=None):
-    """Tên hiển thị: tên tự đặt > tên Claude tự đặt (session_name) > tên thư mục."""
+def title_of(s, names=None, sl=None, edits=None):
+    """Tên hiển thị: "[tag tự đặt] " + (tên tự đặt > tên Claude tự đặt (session_name) > tên thư mục)."""
     if names is None:
         names = read_json(NAMES, {})
     if sl is None:
         sl = read_json(os.path.join(SL_DIR, s["session_id"] + ".json"), {})
-    return (names.get(s["session_id"]) or sl.get("session_name")
+    base = (names.get(s["session_id"]) or sl.get("session_name")
             or os.path.basename((s.get("cwd") or "").rstrip("/\\")) or "?")
+    lbl = session_label(s, edits)
+    return base if not lbl or base.startswith(lbl) else lbl + " " + base
+
+
+# ---------- tag ----------
+# Tag tay: "[tag1 tag2]" ở đầu một dòng hoặc cuối prompt (vd "[task service-a] sửa lỗi login").
+# Chỉ nhận ở vị trí đó để không bắt nhầm code như arr[i], "- [x]" hay link markdown [text](url).
+TAG_BRACKET = re.compile(r"(?:^|(?<=\n))[ \t]*\[([^\[\]\n]{1,80})\](?!\()|(?<!\S)\[([^\[\]\n]{1,80})\]\s*$")
+# placeholder Claude Code tự chèn vào prompt khi dán ảnh/text -> không phải tag
+TAG_SKIP = re.compile(r"^(image|pasted text|pasted image|img)\b", re.I)
+MAX_TAGS, MAX_AUTO_TAGS = 20, 8
+
+# Tag tự động: từ khoá trong prompt (EN + VI, so khớp trên chữ thường còn dấu để "lỗi" != "lời").
+AUTO_TAGS = [(t, re.compile(rx, re.I)) for t, rx in [
+    ("bug", r"\b(fix|bugs?|errors?|crash\w*|broken|traceback|exception|lỗi|hỏng|không chạy)\b"),
+    ("feature", r"\b(feature|implement|tính năng|chức năng)\b"),
+    ("refactor", r"\b(refactor\w*|clean ?up|tái cấu trúc|dọn code)\b"),
+    ("test", r"\b(tests?|unit ?test|pytest|testcase|kiểm thử)\b"),
+    ("docs", r"\b(docs?|documentation|readme|changelog|tài liệu)\b"),
+    ("release", r"\b(release|deploy\w*|publish|rollout|phát hành|triển khai)\b"),
+    ("review", r"\b(review|pull request|merge request|PR #?\d+|MR !?\d+)\b"),
+    ("perf", r"\b(performance|perf|optimi[sz]e\w*|latency|slow|tối ưu|chậm)\b"),
+    ("security", r"\b(security|vulnerab\w*|cve-\d+|hardening|bảo mật)\b"),
+    ("ci", r"\b(ci|ci/cd|pipeline|github actions|gitlab[- ]ci|workflow)\b"),
+    ("question", r"\b(explain|why|how does|giải thích|tại sao|là gì|như thế nào)\b"),
+    ("k8s", r"\b(kubernetes|k8s|kubectl|helm|rke2)\b"),
+    ("docker", r"\b(docker\w*|containers?|podman)\b"),
+    ("terraform", r"\b(terraform|\.tf)\b"),
+    ("ansible", r"\b(ansible|playbook)\b"),
+    ("argocd", r"\bargo ?cd\b"),
+    ("gitlab", r"\bgitlab\b"),
+    ("github", r"\bgithub\b"),
+    ("prometheus", r"\b(prometheus|promql|alertmanager)\b"),
+    ("grafana", r"\bgrafana\b"),
+    ("postgres", r"\b(postgres\w*|psql|patroni|pgbouncer)\b"),
+    ("redis", r"\bredis\b"),
+    ("kafka", r"\bkafka\b"),
+    ("mongodb", r"\bmongo\w*\b"),
+    ("nginx", r"\bnginx\b"),
+    ("python", r"(\bpython3?\b|\.py\b)"),
+    ("go", r"(\bgolang\b|\.go\b)"),
+    ("js", r"(\b(javascript|typescript|node\.?js|react|npm)\b|\.[jt]sx?\b)"),
+    ("swift", r"(\bswift(ui)?\b|\.swift\b)"),
+    ("shell", r"(\b(bash|shell|zsh)\b|\.sh\b)"),
+    ("sql", r"\bsql\b"),
+    ("linux", r"\b(linux|systemd|ubuntu|debian|fedora)\b"),
+    ("windows", r"\b(windows|powershell)\b"),
+    ("macos", r"\b(macos|launchd|launchagent)\b"),
+]]
+
+
+def bracket_label(prompt):
+    """Nhóm "[...]" hợp lệ đầu tiên của prompt, giữ nguyên chữ như gõ (vd "[vi du]") — dùng làm tiền tố tên phiên."""
+    for m in TAG_BRACKET.finditer(prompt or ""):
+        body = " ".join((m.group(1) or m.group(2) or "").split())[:40]
+        if body and not TAG_SKIP.match(body) and any(norm_tag(w) for w in re.split(r"[\s,;]+", body)):
+            return "[%s]" % body
+    return ""
+
+
+def session_label(s, edits=None):
+    """Tiền tố tên phiên = "[...]" của prompt gần nhất có tag; ẩn khi mọi tag trong đó đã bị bỏ bằng tay."""
+    lbl = s.get("tag_label")
+    if lbl is None:  # phiên ghi trước khi có tính năng: lấy từ prompt đã lưu
+        lbl = bracket_label(s.get("last_prompt", "")) or bracket_label(s.get("first_prompt", ""))
+    if not lbl:
+        return ""
+    if edits is None:
+        edits = read_json(TAGS, {})
+    drop = set(edits.get(s["session_id"], {}).get("del", []))
+    words = [t for t in map(norm_tag, re.split(r"[\s,;]+", lbl[1:-1])) if t]
+    return lbl if any(t not in drop for t in words) else ""
+
+
+def norm_tag(t):
+    """Chuẩn hoá 1 tag: chữ thường, bỏ # đầu, chỉ giữ chữ/số/._+-/, phải có ít nhất 1 chữ cái."""
+    t = re.sub(r"[^\w.+/-]", "", unicodedata.normalize("NFC", str(t)).strip().lstrip("#").lower())[:32]
+    return t if any(c.isalpha() for c in t) else ""
+
+
+def _uniq(tags, cap):
+    out = []
+    for t in tags:
+        if t and t not in out:
+            out.append(t)
+    return out[:cap]
+
+
+def extract_tags(prompt):
+    """(tag tay từ "[...]", tag tự động từ từ khoá) của một prompt."""
+    manual = []
+    for m in TAG_BRACKET.finditer(prompt or ""):
+        body = (m.group(1) or m.group(2) or "").strip()
+        if body and not TAG_SKIP.match(body):
+            manual += [norm_tag(w) for w in re.split(r"[\s,;]+", body)]
+    low = unicodedata.normalize("NFC", (prompt or "")[:4000].lower())
+    auto = [t for t, rx in AUTO_TAGS if rx.search(low)]
+    return _uniq(manual, MAX_TAGS), _uniq(auto, MAX_AUTO_TAGS)
+
+
+def session_tags(s, edits=None):
+    """(tất cả tag, tag tự động) để hiển thị: tag tay > tag từ prompt > tag tự động, trừ tag đã bị bỏ."""
+    if edits is None:
+        edits = read_json(TAGS, {})
+    e = edits.get(s["session_id"], {})
+    drop = set(e.get("del", []))
+    if "auto_tags" not in s:  # phiên ghi trước khi có tag: tính từ prompt đã lưu (chỉ trong bộ nhớ)
+        s = dict(s)
+        s["tags"], s["auto_tags"] = map(list, zip(*[extract_tags(s.get(k, "")) for k in ("last_prompt", "first_prompt")]))
+        s["tags"], s["auto_tags"] = _uniq(sum(s["tags"], []), MAX_TAGS), _uniq(sum(s["auto_tags"], []), MAX_AUTO_TAGS)
+    manual = [t for t in _uniq(e.get("add", []) + s.get("tags", []), MAX_TAGS) if t not in drop]
+    auto = [t for t in s.get("auto_tags", []) if t not in drop and t not in manual]
+    return manual + auto, auto
+
+
+def edit_tags(sid, add=(), remove=(), replace=None):
+    """Sửa tag tay (ghi ra tags.json riêng, không đụng file phiên mà hook đang ghi).
+    replace=[...]: đặt đúng danh sách này (dashboard/app gửi lên cả danh sách)."""
+    s = load(sid)
+    if not s:
+        return None
+    edits = read_json(TAGS, {})
+    e = edits.get(sid, {"add": [], "del": []})
+    if replace is not None:
+        new = _uniq([norm_tag(t) for t in replace], MAX_TAGS)
+        cur, _ = session_tags(s, edits)
+        add = [t for t in new if t not in cur]
+        remove = [t for t in cur if t not in new]
+    for t in filter(None, map(norm_tag, add)):
+        e["del"] = [x for x in e.get("del", []) if x != t]
+        if t not in s.get("tags", []) + s.get("auto_tags", []):
+            e["add"] = _uniq(e.get("add", []) + [t], MAX_TAGS)
+    for t in filter(None, map(norm_tag, remove)):
+        e["add"] = [x for x in e.get("add", []) if x != t]
+        e["del"] = _uniq(e.get("del", []) + [t], 200)
+    if e.get("add") or e.get("del"):
+        edits[sid] = e
+    else:
+        edits.pop(sid, None)
+    write_json(TAGS, edits)
+    return session_tags(s, edits)[0]
 
 
 def all_sessions():
@@ -441,6 +585,10 @@ def hook():
         p = (data.get("prompt") or "").strip()
         s.setdefault("first_prompt", p[:300])
         s["last_prompt"] = p[:500]
+        manual, auto = extract_tags(p)
+        s["tags"] = _uniq(manual + s.get("tags", []), MAX_TAGS)
+        s["auto_tags"] = _uniq(auto + s.get("auto_tags", []), MAX_AUTO_TAGS)
+        s["tag_label"] = bracket_label(p) or s.get("tag_label", "")
         s.update(status="running", seen=False, turn_started=now, message="", activity="")
     elif ev == "PreToolUse":
         s.update(status="running", activity=tool_brief(data.get("tool_name", ""), data.get("tool_input")))
@@ -643,6 +791,7 @@ def snapshot(include_closed=False):
     procs = ps_table()
     now = time.time()
     names = read_json(NAMES, {})
+    edits = read_json(TAGS, {})
     cfg = read_json(CONFIG, {})
     # lần đầu chạy bản có tính năng khôi phục: phiên đã chết từ trước coi như đã đóng, không đề nghị mở lại
     first = "restore_since" not in cfg
@@ -673,10 +822,11 @@ def snapshot(include_closed=False):
         s["project"] = os.path.basename((s.get("cwd") or "").rstrip("/\\"))
         s["name"] = names.get(s["session_id"], "")
         s["auto_name"] = sl.get("session_name", "")
-        s["title"] = title_of(s, names, sl)
+        s["title"] = title_of(s, names, sl, edits)
         s["model"] = sl.get("model")
         s["ctx_pct"] = sl.get("ctx_pct")
         s["cost"] = sl.get("cost")
+        s["tags"], s["auto_tags"] = session_tags(s, edits)
         rows.append(s)
     rows.sort(key=lambda r: (ORDER.index(r["state"]), r.get("seen", True), -r.get("updated", 0)))
     if first:
@@ -744,7 +894,7 @@ def restore_watcher(interval=5):
 
 
 SEARCH_FIELDS = ("title", "name", "auto_name", "project", "cwd", "app", "session_id",
-                 "last_prompt", "reply", "message", "activity", "model")
+                 "last_prompt", "reply", "message", "activity", "model", "tags")
 
 
 def fold(s):
@@ -753,10 +903,23 @@ def fold(s):
     return "".join(c for c in s if not unicodedata.combining(c))
 
 
+def _field(v):
+    return " ".join(map(str, v)) if isinstance(v, list) else str(v or "")
+
+
 def matches(r, query):
-    """Mọi từ trong query phải xuất hiện ở ít nhất một trường (AND, không phân biệt hoa thường/dấu)."""
-    hay = fold(" ".join(str(r.get(k) or "") for k in SEARCH_FIELDS))
-    return all(w in hay for w in fold(query).split())
+    """Mọi từ trong query phải khớp (AND, không phân biệt hoa thường/dấu).
+    "#x" hoặc "tag:x": phiên phải có tag bắt đầu bằng x; từ thường: xuất hiện ở trường bất kỳ (kể cả tag)."""
+    hay = fold(" ".join(_field(r.get(k)) for k in SEARCH_FIELDS))
+    tags = [fold(t) for t in r.get("tags") or []]
+    for w in fold(query).split():
+        m = re.match(r"^(?:#|tag:)(.*)$", w)
+        if m:
+            if not any(t.startswith(m.group(1)) for t in tags):
+                return False
+        elif w not in hay:
+            return False
+    return True
 
 
 def fmt_dur(sec):
@@ -798,6 +961,8 @@ def render(include_closed=False, query=""):
         else:
             detail = r.get("last_prompt") or ""
         detail = "%s  « %s" % (detail, (r.get("last_prompt") or "")[:60]) if st in ("done", "waiting") else detail
+        if r.get("tags"):
+            detail = " ".join("#" + t for t in r["tags"][:5]) + "  " + detail
         line = "%-8s  %-12s %-11s %-24s %6s  %s" % (
             r["session_id"][:8], lbl, r.get("app", "?")[:11], r["title"][:24],
             fmt_dur(now - r.get("updated", now)), detail.replace("\n", " "))
@@ -1226,6 +1391,8 @@ def serve(port):
                 ack(sid or "all")
             elif u.path == "/api/rename":
                 set_name(sid, q.get("name", [""])[0])
+            elif u.path == "/api/tags":
+                res = edit_tags(sid, replace=re.split(r"[\s,;]+", q.get("tags", [""])[0])) or "notfound"
             elif u.path == "/api/forget":
                 forget(sid)
             elif u.path == "/api/focus":
@@ -1290,6 +1457,9 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 .sub{font-weight:400}
 #q{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);width:220px}
 #q:focus{outline:none;border-color:var(--run)}
+.tags{display:inline-flex;gap:4px;flex-wrap:wrap}
+.tag{font-size:11px;padding:0 7px;border-radius:99px;border:1px solid var(--line);background:var(--bg);color:var(--run);cursor:pointer}
+.tag.auto{color:var(--mut);border-style:dashed}.tag:hover{border-color:var(--run)}
 .restore{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--lost-bg);color:var(--lost);border:1px solid var(--lost);border-radius:8px;padding:10px 14px;margin:4px 0 8px}
 .restore b{flex:1;min-width:200px}.restore button.pri{background:var(--lost);color:#fff;border-color:var(--lost)}
 </style></head><body>
@@ -1301,12 +1471,17 @@ label{font-size:12px;color:var(--mut);display:flex;gap:4px;align-items:center}
 <script>
 const VI=document.documentElement.lang=="vi",t=(en,vi)=>VI?vi:en,LOC=VI?"vi-VN":undefined;
 document.getElementById("lall").textContent=t("show closed sessions","hiện phiên đã đóng");
-const Q=document.getElementById("q");Q.placeholder=t("Search sessions  ( / )","Tìm phiên  ( / )");
+const Q=document.getElementById("q");Q.placeholder=t("Search, #tag  ( / )","Tìm, #tag  ( / )");
 Q.value=new URLSearchParams(location.hash.slice(1)).get("q")||"";
 // giống fold()/matches() trong ccmon: bỏ dấu, không phân biệt hoa thường, mọi từ phải khớp
 const fold=s=>String(s||"").toLowerCase().replace(/đ/g,"d").normalize("NFD").replace(/[\u0300-\u036f]/g,"");
-const SF=["title","name","auto_name","project","cwd","app","session_id","last_prompt","reply","message","activity","model"];
-const match=(r,ws)=>{const h=fold(SF.map(k=>r[k]||"").join(" "));return ws.every(w=>h.includes(w))};
+const SF=["title","name","auto_name","project","cwd","app","session_id","last_prompt","reply","message","activity","model","tags"];
+const fv=v=>Array.isArray(v)?v.join(" "):(v||"");
+// "#x" / "tag:x": phải có tag bắt đầu bằng x
+const match=(r,ws)=>{const h=fold(SF.map(k=>fv(r[k])).join(" ")),tg=(r.tags||[]).map(fold);
+ return ws.every(w=>{const m=w.match(/^(?:#|tag:)(.*)$/);return m?tg.some(x=>x.startsWith(m[1])):h.includes(w)})};
+function tagq(tg){Q.value=(Q.value.trim()+" #"+tg).trim();Q.oninput()}
+function etag(id){const r=ROWS[id];const n=prompt(t("Tags, separated by spaces (tip: start a prompt with [tag1 tag2]):","Tag, cách nhau bởi dấu cách (mẹo: mở đầu prompt bằng [tag1 tag2]):"),(r.tags||[]).join(" "));if(n!==null)act("tags",id,"&tags="+encodeURIComponent(n))}
 document.getElementById("ackall").textContent=t("Mark all seen","Đánh dấu đã xem hết");
 const L={waiting:t("WAITING","CHỜ BẠN"),done:t("DONE","XONG"),running:t("RUNNING","ĐANG CHẠY"),interrupted:t("INTERRUPTED","BỊ NGẮT"),idle:t("OPEN, IDLE","MỞ, CHƯA LÀM"),closed:t("CLOSED","ĐÃ ĐÓNG"),lost:t("CLOSED UNEXPECTEDLY","BỊ TẮT ĐỘT NGỘT")};
 const C={waiting:"wait",done:"done",running:"run",interrupted:"int",idle:"idle",closed:"idle",lost:"lost"};
@@ -1328,7 +1503,8 @@ function card(r,now){ROWS[r.session_id]=r;const c=C[r.state],nw=!r.seen&&r.state
  let main="";if(r.state=="running")main=r.activity||"";else if(r.state=="waiting")main=r.message||"";else if(r.state=="done")main=r.reply||"";
  const dur=r.state=="running"&&r.turn_started?` · ${t("running","chạy")} ${ago(r.turn_started,now)}`:"";
  return `<div class="card ${nw?"new":""}" style="--c:var(--${c});--cb:var(--${c}-bg)">
- <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="${t("Rename","Đổi tên")}" onclick="ren('${r.session_id}')">✎</button></span>
+ <div class="row"><span class="st">${nw?"● ":""}${L[r.state]}</span><span class="proj">${r.name?"📌 ":""}${esc(r.title)}<button class="ren" title="${t("Rename","Đổi tên")}" onclick="ren('${r.session_id}')">✎</button><button class="ren" title="${t("Edit tags","Sửa tag")}" onclick="etag('${r.session_id}')">🏷</button></span>
+ ${(r.tags||[]).length?`<span class="tags">${r.tags.map(g=>`<span class="tag${(r.auto_tags||[]).includes(g)?" auto":""}" title="${(r.auto_tags||[]).includes(g)?t("automatic tag","tag tự động"):""}" onclick="tagq('${esc(g)}')">#${esc(g)}</span>`).join("")}</span>`:""}
  <span class="mut">${r.title!=r.project?esc(r.project)+" · ":""}${esc(r.app)} · ${r.session_id.slice(0,8)} · ${t(ago(r.updated,now)+" ago",ago(r.updated,now)+" trước")}${dur}${r.ctx_pct!=null?" · ctx "+r.ctx_pct+"%":""}</span>
  <span class="acts">${r.state=="lost"?`<button onclick="act('restore','${r.session_id}')" title="claude --resume">${t("Restore","Khôi phục")}</button><button onclick="act('dismiss','${r.session_id}')">${t("Dismiss","Bỏ qua")}</button>`
  :`<button onclick="act('focus','${r.session_id}')">${r.remote?"Terminal":t("Open","Mở")}</button>`}
@@ -1407,6 +1583,24 @@ def main():
         else:
             set_name(s["session_id"], " ".join(a[2:]))
             print("%s -> %s" % (s["session_id"][:8], title_of(s)))
+    elif cmd == "tag" and len(a) > 1:
+        s = find(a[1])
+        if not s:
+            print(T("no unique session matches '%s'", "không tìm thấy phiên duy nhất khớp '%s'") % a[1])
+        else:
+            tags = edit_tags(s["session_id"], add=[x.lstrip("+") for x in a[2:] if not x.startswith("-")],
+                             remove=[x[1:] for x in a[2:] if x.startswith("-")])
+            print("%s  %s" % (s["session_id"][:8], " ".join("#" + t for t in tags) or T("(no tags)", "(chưa có tag)")))
+    elif cmd == "tags":
+        counts = {}
+        for r in snapshot(True):
+            for t in r["tags"]:
+                counts[t] = counts.get(t, 0) + 1
+        for t, n in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+            print("%4d  #%s" % (n, t))
+        if not counts:
+            print(T("No tags yet. Start a prompt with [tag1 tag2] or run: ccmon tag <id> +tag",
+                    "Chưa có tag. Mở đầu prompt bằng [tag1 tag2] hoặc chạy: ccmon tag <id> +tag"))
     elif cmd == "serve":
         serve(int(a[1]) if len(a) > 1 else 7788)
     elif cmd == "focus" and len(a) > 1:
