@@ -20,6 +20,7 @@ Keep track of every **Claude Code** session you run in parallel (iTerm, the VS C
 - **Session names** you choose (✎ on the dashboard, right-click → Rename… in the app, or `ccmon name`)
 - **Remote Control sessions** started from your phone or claude.ai can be resumed in an iTerm tab with one click (see [below](#remote-control-sessions))
 - **Search** sessions by name, folder, prompt, reply or ID — accent-insensitive, every word must match (dashboard: `/` to focus, Esc to clear; app: ⌘F; CLI: `ccmon ls [-a] <text>`)
+- **Tags**: start a prompt with `[task service-a]` to tag the session; common topics (bug, feature, docs, k8s, python…) are tagged automatically. Filter with `#tag` or `tag:tag`
 - **Restore after a crash**: sessions that closed unexpectedly (crash, reboot, terminal killed) are offered for restore, like Chrome (see [below](#restoring-sessions-after-a-crash))
 - **`ccmon` CLI**
 
@@ -130,6 +131,23 @@ ccmon restore mode auto       # reopen on its own, e.g. after a reboot (ask = de
 
 Only sessions with at least one prompt are offered, for up to 3 days. VS Code sessions are resumed in a terminal. The mode is stored in `~/.claude/ccmon/config.json`; `CCMON_RESTORE=ask|auto|off` takes precedence.
 
+## Tags
+
+Every prompt is scanned for tags:
+
+- **Your tags**: a `[...]` group at the start of a line or at the end of the prompt, words separated by spaces or commas. `[task service-a] fix the login bug` tags the session `#task` and `#service-a`. Use `-` for a multi-word tag. The group, as you typed it, also prefixes the session name: `[vi du] my-repo` (the latest prompt with a group wins; removing all of its tags hides the prefix). Brackets inside text or code (`arr[i]`, `- [x]`, `[text](url)`) and Claude Code's `[Image #1]` / `[Pasted text …]` placeholders are ignored.
+- **Automatic tags** (shown dashed): keyword rules in English and Vietnamese for the kind of work (`bug`, `feature`, `refactor`, `test`, `docs`, `release`, `review`, `perf`, `security`, `ci`, `question`) and the stack (`k8s`, `docker`, `terraform`, `ansible`, `argocd`, `postgres`, `python`, `go`, `js`, `shell`, `linux`, `windows`…). They run locally with regexes; no prompt leaves the machine.
+
+Tags add up over the session (newest first, at most 20 of your own + 8 automatic). Search with `#tag` or `tag:tag` (prefix match, combine with other words), or click a tag in the dashboard or the app.
+
+```bash
+ccmon ls -a tag:service-a     # (in bash, quote '#tag' or use tag:)
+ccmon tag <id> +ddi -k8s      # add / remove tags (also: 🏷 in the dashboard, "Edit tags…" in the app)
+ccmon tags                    # every tag with its session count
+```
+
+Tags you add or remove by hand are kept in `~/.claude/ccmon/tags.json`; a removed automatic tag does not come back.
+
 ## CLI
 
 ```
@@ -141,6 +159,8 @@ ccmon term <id>        open the session in a new terminal tab (claude --resume)
 ccmon ack [id|all]     mark as seen
 ccmon clean            delete closed sessions
 ccmon name <id> [name] set a session name (empty name = clear it)
+ccmon tag <id> [+t|-t] show / add / remove tags
+ccmon tags             every tag with its session count
 ccmon usage            5h / 7d quota
 ccmon restore [all|<id>|dismiss|mode ask|auto|off]  reopen sessions that closed unexpectedly
 ccmon lang [en|vi|auto] UI language
@@ -194,7 +214,7 @@ tests/smoke.py              cross-platform smoke test (make check, CI)
 The server only listens on `127.0.0.1`.
 
 - `GET  /api/sessions?all=0|1` → `{now, rows: [...], usage}`
-- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=`, `/api/restore?id=<id|all>`, `/api/dismiss?id=<id|all>` (requires the `X-CCMon: 1` header)
+- `POST /api/ack?id=<id|all>`, `/api/forget?id=`, `/api/focus?id=`, `/api/term?id=`, `/api/rename?id=&name=`, `/api/tags?id=&tags=a%20b` (replaces the list), `/api/restore?id=<id|all>`, `/api/dismiss?id=<id|all>` (requires the `X-CCMon: 1` header)
 
 ## Troubleshooting
 
